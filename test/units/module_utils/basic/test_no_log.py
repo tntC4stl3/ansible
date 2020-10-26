@@ -1,35 +1,15 @@
 # -*- coding: utf-8 -*-
 # (c) 2015, Toshio Kuratomi <tkuratomi@ansible.com>
-#
-# This file is part of Ansible
-#
-# Ansible is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# Ansible is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
+# (c) 2017, Ansible Project
+# GNU General Public License v3.0+ (see COPYING or https://www.gnu.org/licenses/gpl-3.0.txt)
 
-# Make coding more python3-ish
-from __future__ import (absolute_import, division)
+from __future__ import absolute_import, division, print_function
 __metaclass__ = type
 
-import json
-import sys
-import syslog
+from units.compat import unittest
 
-from ansible.compat.tests import unittest
-from ansible.compat.tests.mock import patch, MagicMock
-
-from ansible.module_utils import basic
-from ansible.module_utils.basic import heuristic_log_sanitize
-from ansible.module_utils.basic import return_values, remove_values
+from ansible.module_utils.basic import remove_values
+from ansible.module_utils.common.parameters import _return_datastructure_name
 
 
 class TestReturnValues(unittest.TestCase):
@@ -61,12 +41,12 @@ class TestReturnValues(unittest.TestCase):
         ('Toshio くらとみ', frozenset(['Toshio くらとみ'])),
     )
 
-    def test_return_values(self):
+    def test_return_datastructure_name(self):
         for data, expected in self.dataset:
-            self.assertEquals(frozenset(return_values(data)), expected)
+            self.assertEqual(frozenset(_return_datastructure_name(data)), expected)
 
     def test_unknown_type(self):
-        self.assertRaises(TypeError, frozenset, return_values(object()))
+        self.assertRaises(TypeError, frozenset, _return_datastructure_name(object()))
 
 
 class TestRemoveValues(unittest.TestCase):
@@ -90,10 +70,9 @@ class TestRemoveValues(unittest.TestCase):
             },
             frozenset(['nope'])
         ),
-        ('Toshio くら', frozenset(['とみ'])),
-        (u'Toshio くら', frozenset(['とみ'])),
+        (u'Toshio くら'.encode('utf-8'), frozenset([u'とみ'.encode('utf-8')])),
+        (u'Toshio くら', frozenset([u'とみ'])),
     )
-
     dataset_remove = (
         ('string', frozenset(['string']), OMIT),
         (1234, frozenset(['1234']), OMIT),
@@ -138,17 +117,44 @@ class TestRemoveValues(unittest.TestCase):
             frozenset(['enigma', 'mystery', 'secret']),
             'This sentence has an ******** wrapped in a ******** inside of a ********. - mr ********'
         ),
-        ('Toshio くらとみ', frozenset(['くらとみ']), 'Toshio ********'),
-        (u'Toshio くらとみ', frozenset(['くらとみ']), u'Toshio ********'),
+        (u'Toshio くらとみ'.encode('utf-8'), frozenset([u'くらとみ'.encode('utf-8')]), u'Toshio ********'.encode('utf-8')),
+        (u'Toshio くらとみ', frozenset([u'くらとみ']), u'Toshio ********'),
     )
 
     def test_no_removal(self):
         for value, no_log_strings in self.dataset_no_remove:
-            self.assertEquals(remove_values(value, no_log_strings), value)
+            self.assertEqual(remove_values(value, no_log_strings), value)
 
     def test_strings_to_remove(self):
         for value, no_log_strings, expected in self.dataset_remove:
-            self.assertEquals(remove_values(value, no_log_strings), expected)
+            self.assertEqual(remove_values(value, no_log_strings), expected)
 
     def test_unknown_type(self):
         self.assertRaises(TypeError, remove_values, object(), frozenset())
+
+    def test_hit_recursion_limit(self):
+        """ Check that we do not hit a recursion limit"""
+        data_list = []
+        inner_list = data_list
+        for i in range(0, 10000):
+            new_list = []
+            inner_list.append(new_list)
+            inner_list = new_list
+        inner_list.append('secret')
+
+        # Check that this does not hit a recursion limit
+        actual_data_list = remove_values(data_list, frozenset(('secret',)))
+
+        levels = 0
+        inner_list = actual_data_list
+        while inner_list:
+            if isinstance(inner_list, list):
+                self.assertEqual(len(inner_list), 1)
+            else:
+                levels -= 1
+                break
+            inner_list = inner_list[0]
+            levels += 1
+
+        self.assertEqual(inner_list, self.OMIT)
+        self.assertEqual(levels, 10000)

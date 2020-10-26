@@ -21,10 +21,11 @@ from __future__ import (absolute_import, division, print_function)
 __metaclass__ = type
 
 import os
+import re
 
 from ansible import constants as C
-from ansible.compat.tests import unittest
-from ansible.compat.tests.mock import patch, MagicMock, mock_open
+from units.compat import unittest
+from units.compat.mock import patch, MagicMock, mock_open
 
 from ansible.errors import AnsibleError
 from ansible.module_utils.six import text_type
@@ -33,11 +34,12 @@ from ansible.module_utils._text import to_bytes
 from ansible.playbook.play_context import PlayContext
 from ansible.plugins.action import ActionBase
 from ansible.template import Templar
+from ansible.vars.clean import clean_facts
 
 from units.mock.loader import DictDataLoader
 
 
-python_module_replacers = b"""
+python_module_replacers = br"""
 #!/usr/bin/python
 
 #ANSIBLE_VERSION = "<<ANSIBLE_VERSION>>"
@@ -52,6 +54,28 @@ powershell_module_replacers = b"""
 WINDOWS_ARGS = "<<INCLUDE_ANSIBLE_MODULE_JSON_ARGS>>"
 # POWERSHELL_COMMON
 """
+
+
+def _action_base():
+    fake_loader = DictDataLoader({
+    })
+    mock_module_loader = MagicMock()
+    mock_shared_loader_obj = MagicMock()
+    mock_shared_loader_obj.module_loader = mock_module_loader
+    mock_connection_loader = MagicMock()
+
+    mock_shared_loader_obj.connection_loader = mock_connection_loader
+    mock_connection = MagicMock()
+
+    play_context = MagicMock()
+
+    action_base = DerivedActionBase(task=None,
+                                    connection=mock_connection,
+                                    play_context=play_context,
+                                    loader=fake_loader,
+                                    templar=None,
+                                    shared_loader_obj=mock_shared_loader_obj)
+    return action_base
 
 
 class DerivedActionBase(ActionBase):
@@ -74,12 +98,12 @@ class TestActionBase(unittest.TestCase):
 
         play_context = PlayContext()
 
-        mock_task.async = None
+        mock_task.async_val = None
         action_base = DerivedActionBase(mock_task, mock_connection, play_context, None, None, None)
         results = action_base.run()
         self.assertEqual(results, dict())
 
-        mock_task.async = 0
+        mock_task.async_val = 0
         action_base = DerivedActionBase(mock_task, mock_connection, play_context, None, None, None)
         results = action_base.run()
         self.assertEqual(results, {})
@@ -91,21 +115,28 @@ class TestActionBase(unittest.TestCase):
         # create our fake task
         mock_task = MagicMock()
         mock_task.action = "copy"
+        mock_task.async_val = 0
+        mock_task.delegate_to = None
 
         # create a mock connection, so we don't actually try and connect to things
         mock_connection = MagicMock()
 
         # create a mock shared loader object
-        def mock_find_plugin(name, options):
+        def mock_find_plugin_with_context(name, options, collection_list=None):
+            mockctx = MagicMock()
             if name == 'badmodule':
-                return None
+                mockctx.resolved = False
+                mockctx.plugin_resolved_path = None
             elif '.ps1' in options:
-                return '/fake/path/to/%s.ps1' % name
+                mockctx.resolved = True
+                mockctx.plugin_resolved_path = '/fake/path/to/%s.ps1' % name
             else:
-                return '/fake/path/to/%s' % name
+                mockctx.resolved = True
+                mockctx.plugin_resolved_path = '/fake/path/to/%s' % name
+            return mockctx
 
         mock_module_loader = MagicMock()
-        mock_module_loader.find_plugin.side_effect = mock_find_plugin
+        mock_module_loader.find_plugin_with_context.side_effect = mock_find_plugin_with_context
         mock_shared_obj_loader = MagicMock()
         mock_shared_obj_loader.module_loader = mock_module_loader
 
@@ -118,7 +149,7 @@ class TestActionBase(unittest.TestCase):
             connection=mock_connection,
             play_context=play_context,
             loader=fake_loader,
-            templar=None,
+            templar=Templar(loader=fake_loader),
             shared_loader_obj=mock_shared_obj_loader,
         )
 
@@ -127,24 +158,25 @@ class TestActionBase(unittest.TestCase):
             with patch.object(os, 'rename'):
                 mock_task.args = dict(a=1, foo='fö〩')
                 mock_connection.module_implementation_preferences = ('',)
-                (style, shebang, data, path) = action_base._configure_module(mock_task.action, mock_task.args)
+                (style, shebang, data, path) = action_base._configure_module(mock_task.action, mock_task.args,
+                                                                             task_vars=dict(ansible_python_interpreter='/usr/bin/python'))
                 self.assertEqual(style, "new")
                 self.assertEqual(shebang, u"#!/usr/bin/python")
 
                 # test module not found
-                self.assertRaises(AnsibleError, action_base._configure_module, 'badmodule', mock_task.args)
+                self.assertRaises(AnsibleError, action_base._configure_module, 'badmodule', mock_task.args, {})
 
         # test powershell module formatting
         with patch.object(builtins, 'open', mock_open(read_data=to_bytes(powershell_module_replacers.strip(), encoding='utf-8'))):
             mock_task.action = 'win_copy'
             mock_task.args = dict(b=2)
             mock_connection.module_implementation_preferences = ('.ps1',)
-            (style, shebang, data, path) = action_base._configure_module('stat', mock_task.args)
+            (style, shebang, data, path) = action_base._configure_module('stat', mock_task.args, {})
             self.assertEqual(style, "new")
             self.assertEqual(shebang, u'#!powershell')
 
             # test module not found
-            self.assertRaises(AnsibleError, action_base._configure_module, 'badmodule', mock_task.args)
+            self.assertRaises(AnsibleError, action_base._configure_module, 'badmodule', mock_task.args, {})
 
     def test_action_base__compute_environment_string(self):
         fake_loader = DictDataLoader({
@@ -188,7 +220,7 @@ class TestActionBase(unittest.TestCase):
         self.assertEqual(env_string, "FOO=foo")
 
         # test environment with a variable in it
-        templar.set_available_variables(variables=dict(the_var='bar'))
+        templar.available_variables = dict(the_var='bar')
         mock_task.environment = [dict(FOO='{{the_var}}')]
         env_string = action_base._compute_environment_string()
         self.assertEqual(env_string, "FOO=bar")
@@ -227,11 +259,23 @@ class TestActionBase(unittest.TestCase):
         # create our fake task
         mock_task = MagicMock()
 
+        def get_shell_opt(opt):
+
+            ret = None
+            if opt == 'admin_users':
+                ret = ['root', 'toor', 'Administrator']
+            elif opt == 'remote_tmp':
+                ret = '~/.ansible/tmp'
+
+            return ret
+
         # create a mock connection, so we don't actually try and connect to things
         mock_connection = MagicMock()
         mock_connection.transport = 'ssh'
         mock_connection._shell.mkdtemp.return_value = 'mkdir command'
         mock_connection._shell.join_path.side_effect = os.path.join
+        mock_connection._shell.get_option = get_shell_opt
+        mock_connection._shell.HOMES_RE = re.compile(r'(\'|\")?(~|\$HOME)(.*)')
 
         # we're using a real play context here
         play_context = PlayContext()
@@ -271,6 +315,199 @@ class TestActionBase(unittest.TestCase):
         self.assertRaises(AnsibleError, action_base._make_tmp_path, 'root')
         action_base._low_level_execute_command.return_value = dict(rc=1, stdout='some stuff here', stderr='No space left on device')
         self.assertRaises(AnsibleError, action_base._make_tmp_path, 'root')
+
+    def test_action_base__fixup_perms2(self):
+        mock_task = MagicMock()
+        mock_connection = MagicMock()
+        play_context = PlayContext()
+        action_base = DerivedActionBase(
+            task=mock_task,
+            connection=mock_connection,
+            play_context=play_context,
+            loader=None,
+            templar=None,
+            shared_loader_obj=None,
+        )
+        action_base._low_level_execute_command = MagicMock()
+        remote_paths = ['/tmp/foo/bar.txt', '/tmp/baz.txt']
+        remote_user = 'remoteuser1'
+
+        def runWithNoExpectation(execute=False):
+            return action_base._fixup_perms2(
+                remote_paths,
+                remote_user=remote_user,
+                execute=execute)
+
+        def assertSuccess(execute=False):
+            self.assertEqual(runWithNoExpectation(execute), remote_paths)
+
+        def assertThrowRegex(regex, execute=False):
+            self.assertRaisesRegexp(
+                AnsibleError,
+                regex,
+                action_base._fixup_perms2,
+                remote_paths,
+                remote_user=remote_user,
+                execute=execute)
+
+        def get_shell_option_for_arg(args_kv, default):
+            '''A helper for get_shell_option. Returns a function that, if
+            called with ``option`` that exists in args_kv, will return the
+            value, else will return ``default`` for every other given arg'''
+            def _helper(option, *args, **kwargs):
+                return args_kv.get(option, default)
+            return _helper
+
+        action_base.get_become_option = MagicMock()
+        action_base.get_become_option.return_value = 'remoteuser2'
+
+        # Step 1: On windows, we just return remote_paths
+        action_base._connection._shell._IS_WINDOWS = True
+        assertSuccess(execute=False)
+        assertSuccess(execute=True)
+
+        # But if we're not on windows....we have more work to do.
+        action_base._connection._shell._IS_WINDOWS = False
+
+        # Step 2: We're /not/ becoming an unprivileged user
+        action_base._remote_chmod = MagicMock()
+        action_base._is_become_unprivileged = MagicMock()
+        action_base._is_become_unprivileged.return_value = False
+        # Two subcases:
+        #   - _remote_chmod rc is 0
+        #   - _remote-chmod rc is not 0, something failed
+        action_base._remote_chmod.return_value = {
+            'rc': 0,
+            'stdout': 'some stuff here',
+            'stderr': '',
+        }
+        assertSuccess(execute=True)
+
+        # When execute=False, we just get the list back. But add it here for
+        # completion. chmod is never called.
+        assertSuccess()
+
+        action_base._remote_chmod.return_value = {
+            'rc': 1,
+            'stdout': 'some stuff here',
+            'stderr': 'and here',
+        }
+        assertThrowRegex(
+            'Failed to set execute bit on remote files',
+            execute=True)
+
+        # Step 3: we are becoming unprivileged
+        action_base._is_become_unprivileged.return_value = True
+
+        # Step 3a: setfacl
+        action_base._remote_set_user_facl = MagicMock()
+        action_base._remote_set_user_facl.return_value = {
+            'rc': 0,
+            'stdout': '',
+            'stderr': '',
+        }
+        assertSuccess()
+
+        # Step 3b: chmod +x if we need to
+        # To get here, setfacl failed, so mock it as such.
+        action_base._remote_set_user_facl.return_value = {
+            'rc': 1,
+            'stdout': '',
+            'stderr': '',
+        }
+        action_base._remote_chmod.return_value = {
+            'rc': 1,
+            'stdout': 'some stuff here',
+            'stderr': '',
+        }
+        assertThrowRegex(
+            'Failed to set file mode on remote temporary file',
+            execute=True)
+        action_base._remote_chmod.return_value = {
+            'rc': 0,
+            'stdout': 'some stuff here',
+            'stderr': '',
+        }
+        assertSuccess(execute=True)
+
+        # Step 3c: chown
+        action_base._remote_chown = MagicMock()
+        action_base._remote_chown.return_value = {
+            'rc': 0,
+            'stdout': '',
+            'stderr': '',
+        }
+        assertSuccess()
+        action_base._remote_chown.return_value = {
+            'rc': 1,
+            'stdout': '',
+            'stderr': '',
+        }
+        remote_user = 'root'
+        action_base._get_admin_users = MagicMock()
+        action_base._get_admin_users.return_value = ['root']
+        assertThrowRegex('user would be unable to read the file.')
+        remote_user = 'remoteuser1'
+
+        # Step 3d: chmod +a on osx
+        assertSuccess()
+        action_base._remote_chmod.assert_called_with(
+            ['remoteuser2 allow read'] + remote_paths,
+            '+a')
+
+        # Step 3e: Common group
+        action_base._remote_chmod = MagicMock()
+        action_base._remote_chmod.side_effect = \
+            lambda x, y: \
+            dict(rc=1, stdout='', stderr='') if y == '+a' \
+            else dict(rc=0, stdout='', stderr='')
+
+        get_shell_option = action_base.get_shell_option
+        action_base.get_shell_option = MagicMock()
+        action_base.get_shell_option.side_effect = get_shell_option_for_arg(
+            {
+                'common_remote_group': 'commongroup',
+            },
+            None)
+        action_base._remote_chgrp = MagicMock()
+        action_base._remote_chgrp.return_value = {
+            'rc': 0,
+            'stdout': '',
+            'stderr': '',
+        }
+        # TODO: Add test to assert warning is shown if
+        # ALLOW_WORLD_READABLE_TMPFILES is set in this case.
+        assertSuccess()
+        action_base._remote_chgrp.assert_called_once_with(
+            remote_paths,
+            'commongroup')
+
+        # Step 4: world-readable tmpdir
+        action_base.get_shell_option.side_effect = get_shell_option_for_arg(
+            {
+                'world_readable_temp': True,
+                'common_remote_group': None,
+            },
+            None)
+        action_base._remote_chmod.return_value = {
+            'rc': 0,
+            'stdout': 'some stuff here',
+            'stderr': '',
+        }
+        assertSuccess()
+        action_base._remote_chmod = MagicMock()
+        action_base._remote_chmod.return_value = {
+            'rc': 1,
+            'stdout': 'some stuff here',
+            'stderr': '',
+        }
+        assertThrowRegex('Failed to set file mode on remote files')
+
+        # Otherwise if we make it here in this state, we hit the catch-all
+        action_base.get_shell_option.side_effect = get_shell_option_for_arg(
+            {},
+            None)
+        assertThrowRegex('on the temporary files Ansible needs to create')
 
     def test_action_base__remove_tmp_path(self):
         # create our fake task
@@ -393,18 +630,22 @@ class TestActionBase(unittest.TestCase):
         mock_task.args = dict(a=1, b=2, c=3)
 
         # create a mock connection, so we don't actually try and connect to things
-        def build_module_command(env_string, shebang, cmd, arg_path=None, rm_tmp=None):
+        def build_module_command(env_string, shebang, cmd, arg_path=None):
             to_run = [env_string, cmd]
             if arg_path:
                 to_run.append(arg_path)
-            if rm_tmp:
-                to_run.append(rm_tmp)
             return " ".join(to_run)
+
+        def get_option(option):
+            return {'admin_users': ['root', 'toor']}.get(option)
 
         mock_connection = MagicMock()
         mock_connection.build_module_command.side_effect = build_module_command
+        mock_connection.socket_path = None
         mock_connection._shell.get_remote_filename.return_value = 'copy.py'
         mock_connection._shell.join_path.side_effect = os.path.join
+        mock_connection._shell.tmpdir = '/var/tmp/mytempdir'
+        mock_connection._shell.get_option = get_option
 
         # we're using a real play context here
         play_context = PlayContext()
@@ -481,31 +722,43 @@ class TestActionBase(unittest.TestCase):
         fake_loader = MagicMock()
         fake_loader.get_basedir.return_value = os.getcwd()
         play_context = PlayContext()
-        action_base = DerivedActionBase(None, None, play_context, fake_loader, None, None)
-        action_base._connection = MagicMock(exec_command=MagicMock(return_value=(0, '', '')))
-        action_base._connection._shell = MagicMock(append_command=MagicMock(return_value=('JOINED CMD')))
 
-        play_context.become = True
-        play_context.become_user = play_context.remote_user = 'root'
-        play_context.make_become_cmd = MagicMock(return_value='CMD')
+        action_base = DerivedActionBase(None, None, play_context, fake_loader, None, None)
+        action_base.get_become_option = MagicMock(return_value='root')
+        action_base._get_remote_user = MagicMock(return_value='root')
+
+        action_base._connection = MagicMock(exec_command=MagicMock(return_value=(0, '', '')))
+
+        action_base._connection._shell = shell = MagicMock(append_command=MagicMock(return_value=('JOINED CMD')))
+
+        action_base._connection.become = become = MagicMock()
+        become.build_become_command.return_value = 'foo'
 
         action_base._low_level_execute_command('ECHO', sudoable=True)
-        play_context.make_become_cmd.assert_not_called()
+        become.build_become_command.assert_not_called()
 
-        play_context.remote_user = 'apo'
+        action_base._get_remote_user.return_value = 'apo'
         action_base._low_level_execute_command('ECHO', sudoable=True, executable='/bin/csh')
-        play_context.make_become_cmd.assert_called_once_with("ECHO", executable='/bin/csh')
+        become.build_become_command.assert_called_once_with("ECHO", shell)
 
-        play_context.make_become_cmd.reset_mock()
+        become.build_become_command.reset_mock()
 
-        become_allow_same_user = C.BECOME_ALLOW_SAME_USER
-        C.BECOME_ALLOW_SAME_USER = True
-        try:
-            play_context.remote_user = 'root'
+        with patch.object(C, 'BECOME_ALLOW_SAME_USER', new=True):
+            action_base._get_remote_user.return_value = 'root'
             action_base._low_level_execute_command('ECHO SAME', sudoable=True)
-            play_context.make_become_cmd.assert_called_once_with("ECHO SAME", executable=None)
-        finally:
-            C.BECOME_ALLOW_SAME_USER = become_allow_same_user
+            become.build_become_command.assert_called_once_with("ECHO SAME", shell)
+
+    def test__remote_expand_user_relative_pathing(self):
+        action_base = _action_base()
+        action_base._play_context.remote_addr = 'bar'
+        action_base._low_level_execute_command = MagicMock(return_value={'stdout': b'../home/user'})
+        action_base._connection._shell.join_path.return_value = '../home/user/foo'
+        with self.assertRaises(AnsibleError) as cm:
+            action_base._remote_expand_user('~/foo')
+        self.assertEqual(
+            cm.exception.message,
+            "'bar' returned an invalid relative home directory path containing '..'"
+        )
 
 
 class TestActionBaseCleanReturnedData(unittest.TestCase):
@@ -549,7 +802,7 @@ class TestActionBaseCleanReturnedData(unittest.TestCase):
                 'ansible_ssh_some_var': 'whatever',
                 'ansible_ssh_host_key_somehost': 'some key here',
                 'some_other_var': 'foo bar'}
-        action_base._clean_returned_data(data)
+        data = clean_facts(data)
         self.assertNotIn('ansible_playbook_python', data)
         self.assertNotIn('ansible_python_interpreter', data)
         self.assertIn('ansible_ssh_host_key_somehost', data)
@@ -558,27 +811,8 @@ class TestActionBaseCleanReturnedData(unittest.TestCase):
 
 class TestActionBaseParseReturnedData(unittest.TestCase):
 
-    def _action_base(self):
-        fake_loader = DictDataLoader({
-        })
-        mock_module_loader = MagicMock()
-        mock_shared_loader_obj = MagicMock()
-        mock_shared_loader_obj.module_loader = mock_module_loader
-        mock_connection_loader = MagicMock()
-
-        mock_shared_loader_obj.connection_loader = mock_connection_loader
-        mock_connection = MagicMock()
-
-        action_base = DerivedActionBase(task=None,
-                                        connection=mock_connection,
-                                        play_context=None,
-                                        loader=fake_loader,
-                                        templar=None,
-                                        shared_loader_obj=mock_shared_loader_obj)
-        return action_base
-
     def test_fail_no_json(self):
-        action_base = self._action_base()
+        action_base = _action_base()
         rc = 0
         stdout = 'foo\nbar\n'
         err = 'oopsy'
@@ -592,7 +826,7 @@ class TestActionBaseParseReturnedData(unittest.TestCase):
         self.assertEqual(res['module_stderr'], err)
 
     def test_json_empty(self):
-        action_base = self._action_base()
+        action_base = _action_base()
         rc = 0
         stdout = '{}\n'
         err = ''
@@ -606,7 +840,7 @@ class TestActionBaseParseReturnedData(unittest.TestCase):
         self.assertFalse(res)
 
     def test_json_facts(self):
-        action_base = self._action_base()
+        action_base = _action_base()
         rc = 0
         stdout = '{"ansible_facts": {"foo": "bar", "ansible_blip": "blip_value"}}\n'
         err = ''
@@ -622,7 +856,7 @@ class TestActionBaseParseReturnedData(unittest.TestCase):
         # self.assertIsInstance(res['ansible_facts'], AnsibleUnsafe)
 
     def test_json_facts_add_host(self):
-        action_base = self._action_base()
+        action_base = _action_base()
         rc = 0
         stdout = '''{"ansible_facts": {"foo": "bar", "ansible_blip": "blip_value"},
         "add_host": {"host_vars": {"some_key": ["whatever the add_host object is"]}

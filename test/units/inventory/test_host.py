@@ -16,9 +16,13 @@
 # along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
 
 # for __setstate__/__getstate__ tests
+
+from __future__ import (absolute_import, division, print_function)
+__metaclass__ = type
+
 import pickle
 
-from ansible.compat.tests import unittest
+from units.compat import unittest
 
 from ansible.inventory.group import Group
 from ansible.inventory.host import Host
@@ -84,7 +88,7 @@ class TestHost(unittest.TestCase):
 
         hostA_clone = Host()
         hostA_clone.deserialize(hostA_data)
-        self.assertEquals(self.hostA, hostA_clone)
+        self.assertEqual(self.hostA, hostA_clone)
 
     def test_set_state(self):
         group = Group('some_group')
@@ -93,7 +97,7 @@ class TestHost(unittest.TestCase):
         pickled_hostA = pickle.dumps(self.hostA)
 
         hostA_clone = pickle.loads(pickled_hostA)
-        self.assertEquals(self.hostA, hostA_clone)
+        self.assertEqual(self.hostA, hostA_clone)
 
 
 class TestHostWithPort(TestHost):
@@ -105,4 +109,4 @@ class TestHostWithPort(TestHost):
 
     def test_get_vars_ansible_port(self):
         host_vars = self.hostA.get_vars()
-        self.assertEquals(host_vars['ansible_port'], self.ansible_port)
+        self.assertEqual(host_vars['ansible_port'], self.ansible_port)

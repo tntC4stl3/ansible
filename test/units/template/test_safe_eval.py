@@ -22,18 +22,11 @@ __metaclass__ = type
 import sys
 from collections import defaultdict
 
-from ansible.compat.tests import unittest
-from ansible.compat.tests.mock import patch, MagicMock
+from units.compat import unittest
 from ansible.template.safe_eval import safe_eval
 
 
 class TestSafeEval(unittest.TestCase):
-
-    def setUp(self):
-        pass
-
-    def tearDown(self):
-        pass
 
     def test_safe_eval_usage(self):
         # test safe eval calls with different possible types for the

@@ -19,29 +19,40 @@
 from __future__ import (absolute_import, division, print_function)
 __metaclass__ = type
 
-from ansible.errors import AnsibleParserError, AnsibleError
+import ansible.constants as C
+from ansible.errors import AnsibleParserError, AnsibleError, AnsibleAssertionError
 from ansible.module_utils.six import iteritems, string_types
 from ansible.module_utils._text import to_text
 from ansible.parsing.splitter import parse_kv, split_args
-from ansible.plugins import module_loader
+from ansible.plugins.loader import module_loader, action_loader
 from ansible.template import Templar
+from ansible.utils.sentinel import Sentinel
 
 
 # For filtering out modules correctly below
-RAW_PARAM_MODULES = ([
-    'command',
-    'win_command',
-    'shell',
-    'win_shell',
-    'script',
+FREEFORM_ACTIONS = frozenset(C.MODULE_REQUIRE_ARGS)
+
+RAW_PARAM_MODULES = FREEFORM_ACTIONS.union((
     'include',
     'include_vars',
+    'include_tasks',
+    'include_role',
+    'import_tasks',
+    'import_role',
     'add_host',
     'group_by',
     'set_fact',
-    'raw',
     'meta',
-])
+))
+
+BUILTIN_TASKS = frozenset((
+    'meta',
+    'include',
+    'include_tasks',
+    'include_role',
+    'import_tasks',
+    'import_role'
+))
 
 
 class ModuleArgsParser:
@@ -91,9 +102,24 @@ class ModuleArgsParser:
     Args may also be munged for certain shell command parameters.
     """
 
-    def __init__(self, task_ds=dict()):
-        assert isinstance(task_ds, dict)
+    def __init__(self, task_ds=None, collection_list=None):
+        task_ds = {} if task_ds is None else task_ds
+
+        if not isinstance(task_ds, dict):
+            raise AnsibleAssertionError("the type of 'task_ds' should be a dict, but is a %s" % type(task_ds))
         self._task_ds = task_ds
+        self._collection_list = collection_list
+        # delayed local imports to prevent circular import
+        from ansible.playbook.task import Task
+        from ansible.playbook.handler import Handler
+        # store the valid Task/Handler attrs for quick access
+        self._task_attrs = set(Task._valid_attrs.keys())
+        self._task_attrs.update(set(Handler._valid_attrs.keys()))
+        # HACK: why are these not FieldAttributes on task with a post-validate to check usage?
+        self._task_attrs.update(['local_action', 'static'])
+        self._task_attrs = frozenset(self._task_attrs)
+
+        self.internal_redirect_list = []
 
     def _split_module_string(self, module_string):
         '''
@@ -105,29 +131,16 @@ class ModuleArgsParser:
 
         tokens = split_args(module_string)
         if len(tokens) > 1:
-            return (tokens[0], " ".join(tokens[1:]))
+            return (tokens[0].strip(), " ".join(tokens[1:]))
         else:
-            return (tokens[0], "")
+            return (tokens[0].strip(), "")
 
-    def _handle_shell_weirdness(self, action, args):
-        '''
-        given an action name and an args dictionary, return the
-        proper action name and args dictionary.  This mostly is due
-        to shell/command being treated special and nothing else
-        '''
-
-        # the shell module really is the command module with an additional
-        # parameter
-        if action == 'shell':
-            action = 'command'
-            args['_uses_shell'] = True
-
-        return (action, args)
-
-    def _normalize_parameters(self, thing, action=None, additional_args=dict()):
+    def _normalize_parameters(self, thing, action=None, additional_args=None):
         '''
         arguments can be fuzzy.  Deal with all the forms.
         '''
+
+        additional_args = {} if additional_args is None else additional_args
 
         # final args are the ones we'll eventually return, so first update
         # them with any additional args specified, which have lower priority
@@ -136,11 +149,11 @@ class ModuleArgsParser:
         if additional_args:
             if isinstance(additional_args, string_types):
                 templar = Templar(loader=None)
-                if templar._contains_vars(additional_args):
+                if templar.is_template(additional_args):
                     final_args['_variable_params'] = additional_args
                 else:
-                    raise AnsibleParserError("Complex args containing variables cannot use bare variables, and must use the full variable style "
-                                             "('{{var_name}}')")
+                    raise AnsibleParserError("Complex args containing variables cannot use bare variables (without Jinja2 delimiters), "
+                                             "and must use the full variable style ('{{var_name}}')")
             elif isinstance(additional_args, dict):
                 final_args.update(additional_args)
             else:
@@ -163,8 +176,8 @@ class ModuleArgsParser:
                 args.update(tmp_args)
 
         # only internal variables can start with an underscore, so
-        # we don't allow users to set them directy in arguments
-        if args and action not in ('command', 'win_command', 'shell', 'win_shell', 'script', 'raw'):
+        # we don't allow users to set them directly in arguments
+        if args and action not in FREEFORM_ACTIONS:
             for arg in args:
                 arg = to_text(arg)
                 if arg.startswith('_ansible_'):
@@ -195,7 +208,7 @@ class ModuleArgsParser:
             args = thing
         elif isinstance(thing, string_types):
             # form is like: copy: src=a dest=b
-            check_raw = action in ('command', 'win_command', 'shell', 'win_shell', 'script', 'raw')
+            check_raw = action in FREEFORM_ACTIONS
             args = parse_kv(thing, check_raw=check_raw)
         elif thing is None:
             # this can happen with modules which take no params, like ping:
@@ -220,21 +233,20 @@ class ModuleArgsParser:
         action = None
         args = None
 
-        actions_allowing_raw = ('command', 'win_command', 'shell', 'win_shell', 'script', 'raw')
         if isinstance(thing, dict):
             # form is like:  action: { module: 'copy', src: 'a', dest: 'b' }
             thing = thing.copy()
             if 'module' in thing:
                 action, module_args = self._split_module_string(thing['module'])
                 args = thing.copy()
-                check_raw = action in actions_allowing_raw
+                check_raw = action in FREEFORM_ACTIONS
                 args.update(parse_kv(module_args, check_raw=check_raw))
                 del args['module']
 
         elif isinstance(thing, string_types):
             # form is like:  action: copy src=a dest=b
             (action, args) = self._split_module_string(thing)
-            check_raw = action in actions_allowing_raw
+            check_raw = action in FREEFORM_ACTIONS
             args = parse_kv(args, check_raw=check_raw)
 
         else:
@@ -243,7 +255,7 @@ class ModuleArgsParser:
 
         return (action, args)
 
-    def parse(self):
+    def parse(self, skip_action_validation=False):
         '''
         Given a task in one of the supported forms, parses and returns
         returns the action, arguments, and delegate_to values for the
@@ -253,8 +265,10 @@ class ModuleArgsParser:
         thing = None
 
         action = None
-        delegate_to = self._task_ds.get('delegate_to', None)
+        delegate_to = self._task_ds.get('delegate_to', Sentinel)
         args = dict()
+
+        self.internal_redirect_list = []
 
         # This is the standard YAML form for command-type modules. We grab
         # the args and pass them in as additional arguments, which can/will
@@ -279,9 +293,29 @@ class ModuleArgsParser:
 
         # module: <stuff> is the more new-style invocation
 
-        # walk the input dictionary to see we recognize a module name
-        for (item, value) in iteritems(self._task_ds):
-            if item in module_loader or item in ['meta', 'include', 'include_role']:
+        # filter out task attributes so we're only querying unrecognized keys as actions/modules
+        non_task_ds = dict((k, v) for k, v in iteritems(self._task_ds) if (k not in self._task_attrs) and (not k.startswith('with_')))
+
+        # walk the filtered input dictionary to see if we recognize a module name
+        for item, value in iteritems(non_task_ds):
+            is_action_candidate = False
+            if item in BUILTIN_TASKS:
+                is_action_candidate = True
+            elif skip_action_validation:
+                is_action_candidate = True
+            else:
+                # If the plugin is resolved and redirected smuggle the list of candidate names via the task attribute 'internal_redirect_list'
+                context = action_loader.find_plugin_with_context(item, collection_list=self._collection_list)
+                if not context.resolved:
+                    context = module_loader.find_plugin_with_context(item, collection_list=self._collection_list)
+                    if context.resolved and context.redirect_list:
+                        self.internal_redirect_list = context.redirect_list
+                elif context.redirect_list:
+                    self.internal_redirect_list = context.redirect_list
+
+                is_action_candidate = bool(self.internal_redirect_list)
+
+            if is_action_candidate:
                 # finding more than one module name is a problem
                 if action is not None:
                     raise AnsibleParserError("conflicting action statements: %s, %s" % (action, item), obj=self._task_ds)
@@ -291,26 +325,22 @@ class ModuleArgsParser:
 
         # if we didn't see any module in the task at all, it's not a task really
         if action is None:
-            if 'ping' not in module_loader:
-                raise AnsibleParserError("The requested action was not found in configured module paths. "
-                                         "Additionally, core modules are missing. If this is a checkout, "
-                                         "run 'git pull --rebase' to correct this problem.",
+            if non_task_ds:  # there was one non-task action, but we couldn't find it
+                bad_action = list(non_task_ds.keys())[0]
+                raise AnsibleParserError("couldn't resolve module/action '{0}'. This often indicates a "
+                                         "misspelling, missing collection, or incorrect module path.".format(bad_action),
                                          obj=self._task_ds)
-
             else:
-                raise AnsibleParserError("no action detected in task. This often indicates a misspelled module name, or incorrect module path.",
+                raise AnsibleParserError("no module/action detected in task.",
                                          obj=self._task_ds)
         elif args.get('_raw_params', '') != '' and action not in RAW_PARAM_MODULES:
             templar = Templar(loader=None)
             raw_params = args.pop('_raw_params')
-            if templar._contains_vars(raw_params):
+            if templar.is_template(raw_params):
                 args['_variable_params'] = raw_params
             else:
                 raise AnsibleParserError("this task '%s' has extra params, which is only allowed in the following modules: %s" % (action,
                                                                                                                                   ", ".join(RAW_PARAM_MODULES)),
                                          obj=self._task_ds)
-
-        # shell modules require special handling
-        (action, args) = self._handle_shell_weirdness(action, args)
 
         return (action, args, delegate_to)

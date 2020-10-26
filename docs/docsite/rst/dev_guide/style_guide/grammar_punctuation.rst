@@ -55,7 +55,7 @@ Commas are always important, considering the vast difference in meanings of the 
 - Let's eat, Grandma
 - Let's eat Grandma.
 
-Correct punctation could save Grandma's life.
+Correct punctuation could save Grandma's life.
 
 If that does not convince you, maybe this will:
 
@@ -101,7 +101,7 @@ Gender References
 ~~~~~~~~~~~~~~~~~~
 Do not use gender-specific pronouns in documentation. It is far less awkward to read a sentence that uses "they" and "their" rather than "he/she" and "his/hers." 
 
-It is fine to use "you" when giving instructions and "the user," "new users," etc. in more general explanations. 
+It is fine to use "you" when giving instructions and "the user," "new users," and so on. in more general explanations. 
 
 Never use "one" in place of "you" when writing technical documentation. Using "one" is far too formal.
 
@@ -110,7 +110,7 @@ Never use "we" when writing. "We" aren't doing anything on the user side. Ansibl
 
 Hyphen
 ~~~~~~~~~~~~~~
-The hyphen’s primary function is the formation of certain compound terms. Do not use a hyphen unless it serves a purpose. If a compound adjective cannot be misread or, as with many psychological terms, its meaning is established, a hyphen is not necessary.
+The hyphen's primary function is the formation of certain compound terms. Do not use a hyphen unless it serves a purpose. If a compound adjective cannot be misread or, as with many psychological terms, its meaning is established, a hyphen is not necessary.
 
 Use hyphens to avoid ambiguity or confusion:
 
@@ -137,7 +137,7 @@ In professionally printed material (particularly books, magazines, and newspaper
 
 Lists
 ~~~~~~~
-Keep the structure of bulleted lists equivalent and consistent. If one bullet is a verb phrase, they should all be verb phrases. If one is a complete sentence, they should all be complete sentences, etc.
+Keep the structure of bulleted lists equivalent and consistent. If one bullet is a verb phrase, they should all be verb phrases. If one is a complete sentence, they should all be complete sentences, and so on.
 
 Capitalize the first word of each bullet. Unless it is obvious that it is just a list of items, such as a list of items like:
 * computer
@@ -189,7 +189,7 @@ Use a semicolon to separate items in a series if the items contain commas:
 
 - Everyday I have coffee, toast, and fruit for breakfast; a salad for lunch; and a peanut butter sandwich, cookies, ice cream, and chocolate cake for dinner.
 
-Use a semicolon before a conjunctive adverb (however, therefore, otherwise, namely, for example, etc.):
+Use a semicolon before a conjunctive adverb (however, therefore, otherwise, namely, for example, and so on):
 - I think; therefore, I am.
 
 Spacing after sentences

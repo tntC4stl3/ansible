@@ -20,14 +20,16 @@ from __future__ import (absolute_import, division, print_function)
 __metaclass__ = type
 
 from ansible.inventory.group import Group
+from ansible.module_utils.common._collections_compat import Mapping, MutableMapping
 from ansible.utils.vars import combine_vars, get_unique_id
 
 __all__ = ['Host']
 
+
 class Host:
     ''' a single ansible host '''
 
-    #__slots__ = [ 'name', 'vars', 'groups' ]
+    # __slots__ = [ 'name', 'vars', 'groups' ]
 
     def __getstate__(self):
         return self.serialize()
@@ -69,11 +71,11 @@ class Host:
     def deserialize(self, data):
         self.__init__(gen_uuid=False)
 
-        self.name    = data.get('name')
-        self.vars    = data.get('vars', dict())
+        self.name = data.get('name')
+        self.vars = data.get('vars', dict())
         self.address = data.get('address', '')
-        self._uuid   = data.get('uuid', None)
-        self.implicit= data.get('implicit', False)
+        self._uuid = data.get('uuid', None)
+        self.implicit = data.get('implicit', False)
 
         groups = data.get('groups', [])
         for group_data in groups:
@@ -100,27 +102,34 @@ class Host:
     def get_name(self):
         return self.name
 
-
-    def populate_ancestors(self):
+    def populate_ancestors(self, additions=None):
         # populate ancestors
-        for group in self.groups:
-            self.add_group(group)
+        if additions is None:
+            for group in self.groups:
+                self.add_group(group)
+        else:
+            for group in additions:
+                if group not in self.groups:
+                    self.groups.append(group)
 
     def add_group(self, group):
-
+        added = False
         # populate ancestors first
         for oldg in group.get_ancestors():
             if oldg not in self.groups:
-                self.add_group(oldg)
+                self.groups.append(oldg)
 
         # actually add group
         if group not in self.groups:
             self.groups.append(group)
+            added = True
+        return added
 
     def remove_group(self, group):
-
+        removed = False
         if group in self.groups:
             self.groups.remove(group)
+            removed = True
 
             # remove exclusive ancestors, xcept all!
             for oldg in group.get_ancestors():
@@ -130,10 +139,13 @@ class Host:
                             break
                     else:
                         self.remove_group(oldg)
-
+        return removed
 
     def set_variable(self, key, value):
-        self.vars[key]=value
+        if key in self.vars and isinstance(self.vars[key], MutableMapping) and isinstance(value, Mapping):
+            self.vars[key] = combine_vars(self.vars[key], value)
+        else:
+            self.vars[key] = value
 
     def get_groups(self):
         return self.groups
@@ -142,10 +154,9 @@ class Host:
         results = {}
         results['inventory_hostname'] = self.name
         results['inventory_hostname_short'] = self.name.split('.')[0]
-        results['group_names'] = sorted([ g.name for g in self.get_groups() if g.name != 'all'])
+        results['group_names'] = sorted([g.name for g in self.get_groups() if g.name != 'all'])
 
-        return combine_vars(self.vars, results)
+        return results
 
     def get_vars(self):
         return combine_vars(self.vars, self.get_magic_vars())
-

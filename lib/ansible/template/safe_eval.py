@@ -14,6 +14,7 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
+
 from __future__ import (absolute_import, division, print_function)
 __metaclass__ = type
 
@@ -21,12 +22,13 @@ import ast
 import sys
 
 from ansible import constants as C
-from ansible.module_utils.six import string_types
+from ansible.module_utils.common.text.converters import container_to_text, to_native
+from ansible.module_utils.six import string_types, PY2
 from ansible.module_utils.six.moves import builtins
-from ansible.plugins import filter_loader, test_loader
+from ansible.plugins.loader import filter_loader, test_loader
 
 
-def safe_eval(expr, locals={}, include_exceptions=False):
+def safe_eval(expr, locals=None, include_exceptions=False):
     '''
     This is intended for allowing things like:
     with_items: a_list_variable
@@ -37,13 +39,19 @@ def safe_eval(expr, locals={}, include_exceptions=False):
     Based on:
     http://stackoverflow.com/questions/12523516/using-ast-and-whitelists-to-make-pythons-eval-safe
     '''
+    locals = {} if locals is None else locals
 
     # define certain JSON types
     # eg. JSON booleans are unknown to python eval()
-    JSON_TYPES = {
+    OUR_GLOBALS = {
+        '__builtins__': {},  # avoid global builtins as per eval docs
         'false': False,
         'null': None,
         'true': True,
+        # also add back some builtins we do need
+        'True': True,
+        'False': False,
+        'None': None
     }
 
     # this is the whitelist of AST nodes we are going to
@@ -54,7 +62,7 @@ def safe_eval(expr, locals={}, include_exceptions=False):
         (
             ast.Add,
             ast.BinOp,
-            #ast.Call,
+            # ast.Call,
             ast.Compare,
             ast.Dict,
             ast.Div,
@@ -88,9 +96,17 @@ def safe_eval(expr, locals={}, include_exceptions=False):
             )
         )
 
+    # And in Python 3.6 too, although not encountered until Python 3.8, see https://bugs.python.org/issue32892
+    if sys.version_info[:2] >= (3, 6):
+        SAFE_NODES.update(
+            set(
+                (ast.Constant,)
+            )
+        )
+
     filter_list = []
-    for filter in filter_loader.all():
-        filter_list.extend(filter.filters().keys())
+    for filter_ in filter_loader.all():
+        filter_list.extend(filter_.filters().keys())
 
     test_list = []
     for test in test_loader.all():
@@ -124,11 +140,15 @@ def safe_eval(expr, locals={}, include_exceptions=False):
     try:
         parsed_tree = ast.parse(expr, mode='eval')
         cnv.visit(parsed_tree)
-        compiled = compile(parsed_tree, expr, 'eval')
+        compiled = compile(parsed_tree, to_native(expr), 'eval')
         # Note: passing our own globals and locals here constrains what
         # callables (and other identifiers) are recognized.  this is in
         # addition to the filtering of builtins done in CleansingNodeVisitor
-        result = eval(compiled, JSON_TYPES, dict(locals))
+        result = eval(compiled, OUR_GLOBALS, dict(locals))
+        if PY2:
+            # On Python 2 u"{'key': 'value'}" is evaluated to {'key': 'value'},
+            # ensure it is converted to {u'key': u'value'}.
+            result = container_to_text(result)
 
         if include_exceptions:
             return (result, None)

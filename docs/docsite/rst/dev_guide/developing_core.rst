@@ -1,10 +1,8 @@
-Developing the Ansible Core Engine
-==================================
+***************************
+Developing ``ansible-base``
+***************************
 
-Although many of the pieces of the Ansible Core Engine are plugins that can be
-swapped out via playbook directives or configuration, there are still pieces
-of the Engine that are not modular.  The documents here give insight into how
-those pieces work together.
+Although ``ansible-base`` (the code hosted in the `ansible/ansible repository <https://github.com/ansible/ansible>`_ on GitHub) includes a few plugins that can be swapped out via playbook directives or configuration, much of the code there is not modular.  The documents here give insight into how the parts of ``ansible-base`` work together.
 
 .. toctree::
    :maxdepth: 1
@@ -13,12 +11,11 @@ those pieces work together.
 
 .. seealso::
 
-   :doc:`developing_api`
+   :ref:`developing_api`
        Learn about the Python API for task execution
-   :doc:`developing_plugins`
+   :ref:`developing_plugins`
        Learn about developing plugins
-   `Mailing List <http://groups.google.com/group/ansible-devel>`_
+   `Mailing List <https://groups.google.com/group/ansible-devel>`_
        The development mailing list
    `irc.freenode.net <http://irc.freenode.net>`_
        #ansible-devel IRC chat channel
-

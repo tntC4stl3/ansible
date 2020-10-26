@@ -19,25 +19,17 @@
 from __future__ import (absolute_import, division, print_function)
 __metaclass__ = type
 
-from ansible.compat.tests import unittest
-from ansible.compat.tests.mock import patch, MagicMock
+from units.compat import unittest
+from units.compat.mock import patch, MagicMock
 
-from ansible.errors import AnsibleError, AnsibleParserError
-from ansible.playbook.block import Block
+from ansible.errors import AnsibleParserError
 from ansible.playbook.play import Play
-from ansible.playbook.role import Role
 
 from units.mock.loader import DictDataLoader
 from units.mock.path import mock_unfrackpath_noop
 
 
 class TestPlay(unittest.TestCase):
-
-    def setUp(self):
-        pass
-
-    def tearDown(self):
-        pass
 
     def test_empty_play(self):
         p = Play.load(dict())

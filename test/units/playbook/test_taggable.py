@@ -19,7 +19,7 @@
 from __future__ import (absolute_import, division, print_function)
 __metaclass__ = type
 
-from ansible.compat.tests import unittest
+from units.compat import unittest
 from ansible.playbook.taggable import Taggable
 from units.mock.loader import DictDataLoader
 
@@ -83,6 +83,9 @@ class TestTaggable(unittest.TestCase):
     def test_evaluate_tags_special_all_in_only_tags(self):
         self.assert_evaluate_equal(True, ['tag'], ['all'], ['untagged'])
 
+    def test_evaluate_tags_special_all_in_only_tags_and_object_untagged(self):
+        self.assert_evaluate_equal(True, [], ['all'], [])
+
     def test_evaluate_tags_special_all_in_skip_tags(self):
         self.assert_evaluate_equal(False, ['tag'], ['tag'], ['all'])
 
@@ -97,9 +100,6 @@ class TestTaggable(unittest.TestCase):
 
     def test_evaluate_tags_accepts_lists(self):
         self.assert_evaluate_equal(True, ['tag1', 'tag2'], ['tag2'], [])
-
-    def test_evaluate_tags_accepts_strings(self):
-        self.assert_evaluate_equal(True, 'tag1,tag2', ['tag2'], [])
 
     def test_evaluate_tags_with_repeated_tags(self):
         self.assert_evaluate_equal(False, ['tag', 'tag'], [], ['tag'])

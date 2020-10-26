@@ -21,14 +21,16 @@ __metaclass__ = type
 
 from jinja2.utils import missing
 
+from ansible.errors import AnsibleError, AnsibleUndefinedVariable
 from ansible.module_utils.six import iteritems
 from ansible.module_utils._text import to_native
+from ansible.module_utils.common._collections_compat import Mapping
 
 
 __all__ = ['AnsibleJ2Vars']
 
 
-class AnsibleJ2Vars:
+class AnsibleJ2Vars(Mapping):
     '''
     Helper class to template all variable content before jinja2 sees it. This is
     done by hijacking the variable storage that jinja2 uses, and overriding __contains__
@@ -47,8 +49,8 @@ class AnsibleJ2Vars:
 
         self._templar = templar
         self._globals = globals
-        self._extras  = extras
-        self._locals  = dict()
+        self._extras = extras
+        self._locals = dict()
         if isinstance(locals, dict):
             for key, val in iteritems(locals):
                 if val is not missing:
@@ -58,7 +60,7 @@ class AnsibleJ2Vars:
                         self._locals[key] = val
 
     def __contains__(self, k):
-        if k in self._templar._available_variables:
+        if k in self._templar.available_variables:
             return True
         if k in self._locals:
             return True
@@ -69,8 +71,18 @@ class AnsibleJ2Vars:
             return True
         return False
 
+    def __iter__(self):
+        keys = set()
+        keys.update(self._templar.available_variables, self._locals, self._globals, *self._extras)
+        return iter(keys)
+
+    def __len__(self):
+        keys = set()
+        keys.update(self._templar.available_variables, self._locals, self._globals, *self._extras)
+        return len(keys)
+
     def __getitem__(self, varname):
-        if varname not in self._templar._available_variables:
+        if varname not in self._templar.available_variables:
             if varname in self._locals:
                 return self._locals[varname]
             for i in self._extras:
@@ -81,7 +93,7 @@ class AnsibleJ2Vars:
             else:
                 raise KeyError("undefined variable: %s" % varname)
 
-        variable = self._templar._available_variables[varname]
+        variable = self._templar.available_variables[varname]
 
         # HostVars is special, return it as-is, as is the special variable
         # 'vars', which contains the vars structure
@@ -92,8 +104,13 @@ class AnsibleJ2Vars:
             value = None
             try:
                 value = self._templar.template(variable)
+            except AnsibleUndefinedVariable as e:
+                raise AnsibleUndefinedVariable("%s: %s" % (to_native(variable), e.message))
             except Exception as e:
-                raise type(e)(to_native(variable) + ': ' + e.message)
+                msg = getattr(e, 'message', None) or to_native(e)
+                raise AnsibleError("An unhandled exception occurred while templating '%s'. "
+                                   "Error was a %s, original message: %s" % (to_native(variable), type(e), msg))
+
             return value
 
     def add_locals(self, locals):
@@ -103,4 +120,11 @@ class AnsibleJ2Vars:
         '''
         if locals is None:
             return self
-        return AnsibleJ2Vars(self._templar, self._globals, locals=locals, *self._extras)
+
+        # FIXME run this only on jinja2>=2.9?
+        # prior to version 2.9, locals contained all of the vars and not just the current
+        # local vars so this was not necessary for locals to propagate down to nested includes
+        new_locals = self._locals.copy()
+        new_locals.update(locals)
+
+        return AnsibleJ2Vars(self._templar, self._globals, locals=new_locals, *self._extras)

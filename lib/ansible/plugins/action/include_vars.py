@@ -1,19 +1,5 @@
-# (c) 2016, Allen Sanabria <asanabria@linuxdynasty.org>
-#
-# This file is part of Ansible
-#
-# Ansible is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# Ansible is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
+# Copyright: (c) 2016, Allen Sanabria <asanabria@linuxdynasty.org>
+# GNU General Public License v3.0+ (see COPYING or https://www.gnu.org/licenses/gpl-3.0.txt)
 
 from __future__ import (absolute_import, division, print_function)
 __metaclass__ = type
@@ -32,7 +18,7 @@ class ActionModule(ActionBase):
     TRANSFERS_FILES = False
 
     VALID_FILE_EXTENSIONS = ['yaml', 'yml', 'json']
-    VALID_DIR_ARGUMENTS = ['dir', 'depth', 'files_matching', 'ignore_files', 'extensions']
+    VALID_DIR_ARGUMENTS = ['dir', 'depth', 'files_matching', 'ignore_files', 'extensions', 'ignore_unknown_extensions']
     VALID_FILE_ARGUMENTS = ['file', '_raw_params']
     VALID_ALL = ['name']
 
@@ -48,7 +34,7 @@ class ActionModule(ActionBase):
         if not self.ignore_files:
             self.ignore_files = list()
 
-        if isinstance(self.ignore_files, str):
+        if isinstance(self.ignore_files, string_types):
             self.ignore_files = self.ignore_files.split()
 
         elif isinstance(self.ignore_files, dict):
@@ -65,9 +51,12 @@ class ActionModule(ActionBase):
         self.source_file = self._task.args.get('file', None)
         if not self.source_dir and not self.source_file:
             self.source_file = self._task.args.get('_raw_params')
+            if self.source_file:
+                self.source_file = self.source_file.rstrip('\n')
 
         self.depth = self._task.args.get('depth', None)
         self.files_matching = self._task.args.get('files_matching', None)
+        self.ignore_unknown_extensions = self._task.args.get('ignore_unknown_extensions', False)
         self.ignore_files = self._task.args.get('ignore_files', None)
         self.valid_extensions = self._task.args.get('extensions', self.VALID_FILE_EXTENSIONS)
 
@@ -80,10 +69,13 @@ class ActionModule(ActionBase):
     def run(self, tmp=None, task_vars=None):
         """ Load yml files recursively from a directory.
         """
+        del tmp  # tmp no longer has any effect
+
         if task_vars is None:
             task_vars = dict()
 
         self.show_content = True
+        self.included_files = []
 
         # Validate arguments
         dirs = 0
@@ -96,10 +88,10 @@ class ActionModule(ActionBase):
             elif arg in self.VALID_ALL:
                 pass
             else:
-                raise AnsibleError('{0} is not a valid option in debug'.format(arg))
+                raise AnsibleError('{0} is not a valid option in include_vars'.format(to_native(arg)))
 
         if dirs and files:
-            raise AnsibleError("Your are mixing file only and dir only arguments, these are incompatible")
+            raise AnsibleError("You are mixing file only and dir only arguments, these are incompatible")
 
         # set internal vars from args
         self._set_args()
@@ -108,15 +100,18 @@ class ActionModule(ActionBase):
         if self.source_dir:
             self._set_dir_defaults()
             self._set_root_dir()
-            if path.exists(self.source_dir):
+            if not path.exists(self.source_dir):
+                failed = True
+                err_msg = ('{0} directory does not exist'.format(to_native(self.source_dir)))
+            elif not path.isdir(self.source_dir):
+                failed = True
+                err_msg = ('{0} is not a directory'.format(to_native(self.source_dir)))
+            else:
                 for root_dir, filenames in self._traverse_dir_depth():
                     failed, err_msg, updated_results = (self._load_files_in_dir(root_dir, filenames))
                     if failed:
                         break
                     results.update(updated_results)
-            else:
-                failed = True
-                err_msg = ('{0} directory does not exist'.format(self.source_dir))
         else:
             try:
                 self.source_file = self._find_needle('vars', self.source_file)
@@ -135,12 +130,13 @@ class ActionModule(ActionBase):
             scope[self.return_results_as_name] = results
             results = scope
 
-        result = super(ActionModule, self).run(tmp, task_vars)
+        result = super(ActionModule, self).run(task_vars=task_vars)
 
         if failed:
             result['failed'] = failed
             result['message'] = err_msg
 
+        result['ansible_included_var_files'] = self.included_files
         result['ansible_facts'] = results
         result['_ansible_no_log'] = not self.show_content
 
@@ -162,10 +158,11 @@ class ActionModule(ActionBase):
                 )
                 self.source_dir = path_to_use
         else:
-            current_dir = (
-                "/".join(self._task._ds._data_source.split('/')[:-1])
-            )
-            self.source_dir = path.join(current_dir, self.source_dir)
+            if hasattr(self._task._ds, '_data_source'):
+                current_dir = (
+                    "/".join(self._task._ds._data_source.split('/')[:-1])
+                )
+                self.source_dir = path.join(current_dir, self.source_dir)
 
     def _traverse_dir_depth(self):
         """ Recursively iterate over a directory and sort the files in
@@ -208,7 +205,6 @@ class ActionModule(ActionBase):
             Bool
         """
         file_ext = path.splitext(source_file)
-        print(file_ext[-1][2:])
         return bool(len(file_ext) > 1 and file_ext[-1][1:] in self.valid_extensions)
 
     def _load_files(self, filename, validate_extensions=False):
@@ -224,19 +220,20 @@ class ActionModule(ActionBase):
         err_msg = ''
         if validate_extensions and not self._is_valid_file_ext(filename):
             failed = True
-            err_msg = ('{0} does not have a valid extension: {1}' .format(filename, ', '.join(self.valid_extensions)))
+            err_msg = ('{0} does not have a valid extension: {1}'.format(to_native(filename), ', '.join(self.valid_extensions)))
         else:
             b_data, show_content = self._loader._get_file_contents(filename)
             data = to_text(b_data, errors='surrogate_or_strict')
 
             self.show_content = show_content
-            data = self._loader.load(data, show_content)
+            data = self._loader.load(data, file_name=filename, show_content=show_content)
             if not data:
                 data = dict()
             if not isinstance(data, dict):
                 failed = True
-                err_msg = ('{0} must be stored as a dictionary/hash' .format(filename))
+                err_msg = ('{0} must be stored as a dictionary/hash'.format(to_native(filename)))
             else:
+                self.included_files.append(filename)
                 results.update(data)
 
         return failed, err_msg, results
@@ -257,7 +254,7 @@ class ActionModule(ActionBase):
             stop_iter = False
             # Never include main.yml from a role, as that is the default included by the role
             if self._task._role:
-                if filename == 'main.yml':
+                if path.join(self._task._role._role_path, filename) == path.join(root_dir, 'vars', 'main.yml'):
                     stop_iter = True
                     continue
 
@@ -267,9 +264,15 @@ class ActionModule(ActionBase):
                     stop_iter = True
 
             if not stop_iter and not failed:
-                if path.exists(filepath) and not self._ignore_file(filename):
-                    failed, err_msg, loaded_data = self._load_files(filepath, validate_extensions=True)
-                    if not failed:
-                        results.update(loaded_data)
+                if self.ignore_unknown_extensions:
+                    if path.exists(filepath) and not self._ignore_file(filename) and self._is_valid_file_ext(filename):
+                        failed, err_msg, loaded_data = self._load_files(filepath, validate_extensions=True)
+                        if not failed:
+                            results.update(loaded_data)
+                else:
+                    if path.exists(filepath) and not self._ignore_file(filename):
+                        failed, err_msg, loaded_data = self._load_files(filepath, validate_extensions=True)
+                        if not failed:
+                            results.update(loaded_data)
 
         return failed, err_msg, results

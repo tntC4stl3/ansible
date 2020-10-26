@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
 
+from __future__ import (absolute_import, division, print_function)
+__metaclass__ = type
+
 import unittest
 
 from ansible.parsing.utils.addresses import parse_address
@@ -74,7 +77,7 @@ class TestParseAddress(unittest.TestCase):
 
             try:
                 (host, port) = parse_address(t)
-            except:
+            except Exception:
                 host = None
                 port = None
 
@@ -87,7 +90,7 @@ class TestParseAddress(unittest.TestCase):
 
             try:
                 (host, port) = parse_address(t, allow_ranges=True)
-            except:
+            except Exception:
                 host = None
                 port = None
 

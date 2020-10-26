@@ -1,4 +1,8 @@
 #!/usr/bin/python
+# Most of these names are only available via PluginLoader so pylint doesn't
+# know they exist
+# pylint: disable=no-name-in-module
+__metaclass__ = type
 
 results = {}
 

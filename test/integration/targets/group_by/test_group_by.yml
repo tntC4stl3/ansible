@@ -20,18 +20,7 @@
   hosts: all
   gather_facts: false
   tasks:
-    - debug: var=genus
-    - name: group by genus
-      group_by: key={{ genus }}
-
-    - name: group by first three letters of genus with key in quotes
-      group_by: key="{{ genus[:3] }}"
-
-    - name: group by first two letters of genus with key not in quotes
-      group_by: key={{ genus[:2] }}
-
-    - name: group by genus in uppercase using complex args
-      group_by: { key: "{{ genus | upper() }}" }
+    - include_tasks: create_groups.yml
 
 - name: Vicunga group validation
   hosts: vicugna
@@ -141,13 +130,6 @@
     - name: set a fact to check that we ran this play
       set_fact: genus_CAMELUS=true
 
-- name: genus group validation (expect skipped)
-  hosts: 'genus'
-  gather_facts: false
-  tasks:
-    - name: no hosts should match this group
-      fail: msg="should never get here"
-
 - name: alpaca validation of groups
   hosts: alpaca
   gather_facts: false
@@ -185,3 +167,21 @@
   tasks:
     - name: check group_vars variable overrides for camelus
       assert: { that: ["uno == 1", "dos == 'two'", "tres == 3"] }
+
+- name: Nested group validation
+  hosts: lama
+  gather_facts: false
+  tasks:
+    - name: group by genus with parent
+      group_by: key=vicugna-{{ genus }} parents=vicugna
+    - name: check group_vars variable overrides for vicugna-lama
+      assert: { that: ["uno == 1", "dos == 2", "tres == 'three'"] }
+
+    - name: group by genus with nonexistent parent
+      group_by:
+        key: "{{ genus }}"
+        parents:
+          - oxydactylus
+          - stenomylus
+    - name: check parent groups
+      assert: { that: ["'oxydactylus' in group_names", "'stenomylus' in group_names"] }

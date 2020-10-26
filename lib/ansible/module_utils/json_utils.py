@@ -24,10 +24,11 @@
 # USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
 
-try:
-    import json
-except ImportError:
-    import simplejson as json
+from __future__ import (absolute_import, division, print_function)
+__metaclass__ = type
+
+import json
+
 
 # NB: a copy of this function exists in ../../modules/core/async_wrapper.py. Ensure any
 # changes are propagated there.

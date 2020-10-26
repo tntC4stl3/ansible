@@ -1,3 +1,5 @@
+:orphan:
+
 Why Use a Style Guide?
 `````````````````````````````````
 
@@ -13,9 +15,9 @@ This style guide incorporates current Ansible resources and information so that 
 
    <blockquote class="note info">
 
-   “If you don't find it in the index, look very carefully through the entire catalogue.” 
-    ― Sears, Roebuck and Co., 1897 Sears Roebuck & Co. Catalogue 
- 
+   "If you don't find it in the index, look very carefully through the entire catalogue."
+    ― Sears, Roebuck and Co., 1897 Sears Roebuck & Co. Catalogue
+
 .. raw:: html
 
    </blockquote>

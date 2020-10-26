@@ -19,18 +19,12 @@
 from __future__ import (absolute_import, division, print_function)
 __metaclass__ = type
 
-from ansible.compat.tests import unittest
+from units.compat import unittest
 from ansible.playbook.block import Block
 from ansible.playbook.task import Task
 
 
 class TestBlock(unittest.TestCase):
-
-    def setUp(self):
-        pass
-
-    def tearDown(self):
-        pass
 
     def test_construct_empty_block(self):
         b = Block()

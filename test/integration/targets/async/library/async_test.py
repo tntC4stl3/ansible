@@ -1,3 +1,6 @@
+from __future__ import (absolute_import, division, print_function)
+__metaclass__ = type
+
 import json
 import sys
 
@@ -33,10 +36,14 @@ def main():
         if 'exception' in fail_mode:
             raise Exception('failing via exception')
 
+        if 'stderr' in fail_mode:
+            print('printed to stderr', file=sys.stderr)
+
         module.exit_json(**result)
 
     finally:
         if 'trailing_junk' in fail_mode:
             print("trailing junk after module output")
+
 
 main()

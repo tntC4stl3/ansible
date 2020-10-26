@@ -15,11 +15,26 @@
 # You should have received a copy of the GNU General Public License
 # along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
 
-- include: 'apt.yml'
-  when: ansible_distribution in ('Ubuntu', 'Debian')
+- block:
+  - import_tasks: 'apt.yml'
 
-- include: 'apt-multiarch.yml'
-  when: ansible_distribution in ('Ubuntu', 'Debian') and ansible_userspace_architecture != apt_foreign_arch
+  - import_tasks: 'url-with-deps.yml'
 
-- include: 'apt-builddep.yml'
-  when: ansible_distribution in ('Ubuntu', 'Debian')
+  - import_tasks: 'apt-multiarch.yml'
+    when:
+      - ansible_userspace_architecture != apt_foreign_arch
+
+  - import_tasks: 'apt-builddep.yml'
+
+  - block:
+      - import_tasks: 'repo.yml'
+    always:
+      - file:
+          path: /etc/apt/sources.list.d/file_tmp_repo.list
+          state: absent
+      - file:
+          name: "{{ repodir }}"
+          state: absent
+
+  when:
+    - ansible_distribution in ('Ubuntu', 'Debian')

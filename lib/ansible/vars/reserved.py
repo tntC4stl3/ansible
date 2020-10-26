@@ -23,12 +23,9 @@ from ansible.playbook import Play
 from ansible.playbook.block import Block
 from ansible.playbook.role import Role
 from ansible.playbook.task import Task
+from ansible.utils.display import Display
 
-try:
-    from __main__ import display
-except ImportError:
-    from ansible.utils.display import Display
-    display = Display()
+display = Display()
 
 
 def get_reserved_names(include_private=True):
@@ -68,11 +65,22 @@ def get_reserved_names(include_private=True):
     return result
 
 
-def warn_if_reserved(myvars):
+def warn_if_reserved(myvars, additional=None):
     ''' this function warns if any variable passed conflicts with internally reserved names '''
-    reserved = get_reserved_names()
-    for varname in myvars:
-        if varname == 'vars':
-            continue  # we add this one internally
-        if varname in reserved:
-            display.warning('Found variable using reserved name: %s' % varname)
+
+    if additional is None:
+        reserved = _RESERVED_NAMES
+    else:
+        reserved = _RESERVED_NAMES.union(additional)
+
+    varnames = set(myvars)
+    varnames.discard('vars')  # we add this one internally, so safe to ignore
+    for varname in varnames.intersection(reserved):
+        display.warning('Found variable using reserved name: %s' % varname)
+
+
+def is_reserved_name(name):
+    return name in _RESERVED_NAMES
+
+
+_RESERVED_NAMES = frozenset(get_reserved_names())

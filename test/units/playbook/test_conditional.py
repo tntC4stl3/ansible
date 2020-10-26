@@ -1,8 +1,10 @@
+from __future__ import (absolute_import, division, print_function)
+__metaclass__ = type
 
-from ansible.compat.tests import unittest
+from units.compat import unittest
 from units.mock.loader import DictDataLoader
+from units.compat.mock import MagicMock
 
-from ansible.plugins.strategy import SharedPluginLoaderObj
 from ansible.template import Templar
 from ansible import errors
 
@@ -13,7 +15,6 @@ class TestConditional(unittest.TestCase):
     def setUp(self):
         self.loader = DictDataLoader({})
         self.cond = conditional.Conditional(loader=self.loader)
-        self.shared_loader = SharedPluginLoaderObj()
         self.templar = Templar(loader=self.loader, variables={})
 
     def _eval_con(self, when=None, variables=None):
@@ -32,6 +33,20 @@ class TestConditional(unittest.TestCase):
         when = [u"True"]
         ret = self._eval_con(when, {})
         self.assertTrue(ret)
+
+    def test_true_boolean(self):
+        self.cond.when = [True]
+        m = MagicMock()
+        ret = self.cond.evaluate_conditional(m, {})
+        self.assertTrue(ret)
+        self.assertFalse(m.is_template.called)
+
+    def test_false_boolean(self):
+        self.cond.when = [False]
+        m = MagicMock()
+        ret = self.cond.evaluate_conditional(m, {})
+        self.assertFalse(ret)
+        self.assertFalse(m.is_template.called)
 
     def test_undefined(self):
         when = [u"{{ some_undefined_thing }}"]
@@ -72,19 +87,6 @@ class TestConditional(unittest.TestCase):
         ret = self._eval_con(when, variables)
         self.assertTrue(ret)
 
-    def test_dict_undefined_values(self):
-        variables = {'dict_value': 1,
-                     'some_defined_dict_with_undefined_values': {'key1': 'value1',
-                                                                 'key2': '{{ dict_value }}',
-                                                                 'key3': '{{ undefined_dict_value }}'
-                                                                 }}
-
-        when = [u"some_defined_dict_with_undefined_values is defined"]
-        self.assertRaisesRegexp(errors.AnsibleError,
-                                "The conditional check 'some_defined_dict_with_undefined_values is defined' failed.",
-                                self._eval_con,
-                                when, variables)
-
     def test_nested_hostvars_undefined_values(self):
         variables = {'dict_value': 1,
                      'hostvars': {'host1': {'key1': 'value1',
@@ -99,7 +101,7 @@ class TestConditional(unittest.TestCase):
         when = [u"some_dict.some_dict_key1 == hostvars['host3']"]
         # self._eval_con(when, variables)
         self.assertRaisesRegexp(errors.AnsibleError,
-                                "The conditional check 'some_dict.some_dict_key1 == hostvars\['host3'\]' failed",
+                                r"The conditional check 'some_dict.some_dict_key1 == hostvars\['host3'\]' failed",
                                 # "The conditional check 'some_dict.some_dict_key1 == hostvars['host3']' failed",
                                 # "The conditional check 'some_dict.some_dict_key1 == hostvars['host3']' failed.",
                                 self._eval_con,

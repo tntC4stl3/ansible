@@ -1,31 +1,17 @@
+# This code is part of Ansible, but is an independent component.
+# This particular file snippet, and this file snippet only, is BSD licensed.
+# Modules you write using this snippet, which is embedded dynamically by Ansible
+# still belong to the author of the module, and may assign their own license
+# to the complete work.
 #
-# (c) 2015 Brian Ccoa, <bcoca@ansible.com>
+# Copyright: (c) 2015, Brian Coca, <bcoca@ansible.com>
 #
-# This file is part of Ansible
-#
-# Ansible is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# Ansible is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
-#
+# Simplified BSD License (see licenses/simplified_bsd.txt or https://opensource.org/licenses/BSD-2-Clause)
 """
 This module adds shared support for generic api modules
 
 In order to use this module, include it as part of a custom
 module as shown below.
-
-** Note: The order of the import statements does matter. **
-
-from ansible.module_utils.basic import *
-from ansible.module_utils.api import *
 
 The 'api' module provides the following common argument specs:
 
@@ -36,9 +22,13 @@ The 'api' module provides the following common argument specs:
     * retry spec
         - retries: number of attempts
         - retry_pause: delay between attempts in seconds
-
 """
+from __future__ import (absolute_import, division, print_function)
+__metaclass__ = type
+
+import sys
 import time
+
 
 def rate_limit_argument_spec(spec=None):
     """Creates an argument spec for working with rate limiting"""
@@ -50,6 +40,7 @@ def rate_limit_argument_spec(spec=None):
         arg_spec.update(spec)
     return arg_spec
 
+
 def retry_argument_spec(spec=None):
     """Creates an argument spec for working with retrying"""
     arg_spec = (dict(
@@ -60,41 +51,52 @@ def retry_argument_spec(spec=None):
         arg_spec.update(spec)
     return arg_spec
 
+
 def basic_auth_argument_spec(spec=None):
     arg_spec = (dict(
-        api_username=dict(type='str', required=False),
-        api_password=dict(type='str', required=False, no_log=True),
-        api_url=dict(type='str', required=False),
+        api_username=dict(type='str'),
+        api_password=dict(type='str', no_log=True),
+        api_url=dict(type='str'),
         validate_certs=dict(type='bool', default=True)
     ))
     if spec:
         arg_spec.update(spec)
     return arg_spec
 
+
 def rate_limit(rate=None, rate_limit=None):
     """rate limiting decorator"""
     minrate = None
     if rate is not None and rate_limit is not None:
         minrate = float(rate_limit) / float(rate)
+
     def wrapper(f):
         last = [0.0]
-        def ratelimited(*args,**kwargs):
+
+        def ratelimited(*args, **kwargs):
+            if sys.version_info >= (3, 8):
+                real_time = time.process_time
+            else:
+                real_time = time.clock
             if minrate is not None:
-                elapsed = time.clock() - last[0]
+                elapsed = real_time() - last[0]
                 left = minrate - elapsed
                 if left > 0:
                     time.sleep(left)
-                last[0] = time.clock()
-            ret = f(*args,**kwargs)
+                last[0] = real_time()
+            ret = f(*args, **kwargs)
             return ret
+
         return ratelimited
     return wrapper
+
 
 def retry(retries=None, retry_pause=1):
     """Retry decorator"""
     def wrapper(f):
-        retry_count = 0
-        def retried(*args,**kwargs):
+
+        def retried(*args, **kwargs):
+            retry_count = 0
             if retries is not None:
                 ret = None
                 while True:
@@ -102,13 +104,13 @@ def retry(retries=None, retry_pause=1):
                     if retry_count >= retries:
                         raise Exception("Retry limit exceeded: %d" % retries)
                     try:
-                        ret = f(*args,**kwargs)
-                    except:
+                        ret = f(*args, **kwargs)
+                    except Exception:
                         pass
                     if ret:
                         break
                     time.sleep(retry_pause)
                 return ret
+
         return retried
     return wrapper
-

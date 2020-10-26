@@ -1,47 +1,62 @@
-# (c) 2012-2014, Michael DeHaan <michael.dehaan@gmail.com>
-#
-# This file is part of Ansible
-#
-# Ansible is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# Ansible is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
-'''
-DOCUMENTATION:
-    inventory: script
-    version_added: "2.4"
-    short_description: Executes an inventory script that returns JSON
-    description:
-        - The source provided must an executable that returns Ansible inventory JSON
-        - The source must accept C(--list) and C(--host <hostname>) as arguments.
-          C(--host) will only be used if no C(_meta) key is present (performance optimization)
-    notes:
-        - It takes the place of the previously hardcoded script inventory.
-        - To function it requires being whitelisted in configuration, which is true by default.
-'''
+# Copyright (c) 2012-2014, Michael DeHaan <michael.dehaan@gmail.com>
+# Copyright (c) 2017 Ansible Project
+# GNU General Public License v3.0+ (see COPYING or https://www.gnu.org/licenses/gpl-3.0.txt)
+
 from __future__ import (absolute_import, division, print_function)
 __metaclass__ = type
 
+DOCUMENTATION = '''
+    name: script
+    version_added: "2.4"
+    short_description: Executes an inventory script that returns JSON
+    options:
+      cache:
+        deprecated:
+          why: This option has never been in use. External scripts must implement their own caching.
+          version: "2.12"
+        description:
+          - This option has no effect. The plugin will not cache results because external inventory scripts
+            are responsible for their own caching. This option will be removed in 2.12.
+        ini:
+           - section: inventory_plugin_script
+             key: cache
+        env:
+           - name: ANSIBLE_INVENTORY_PLUGIN_SCRIPT_CACHE
+      always_show_stderr:
+        description: Toggle display of stderr even when script was successful
+        version_added: "2.5.1"
+        default: True
+        type: boolean
+        ini:
+           - section: inventory_plugin_script
+             key: always_show_stderr
+        env:
+           - name: ANSIBLE_INVENTORY_PLUGIN_SCRIPT_STDERR
+    description:
+        - The source provided must be an executable that returns Ansible inventory JSON
+        - The source must accept C(--list) and C(--host <hostname>) as arguments.
+          C(--host) will only be used if no C(_meta) key is present.
+          This is a performance optimization as the script would be called per host otherwise.
+    notes:
+        - Whitelisted in configuration by default.
+        - The plugin does not cache results because external inventory scripts are responsible for their own caching.
+'''
+
 import os
 import subprocess
-from collections import Mapping
 
 from ansible.errors import AnsibleError, AnsibleParserError
 from ansible.module_utils.basic import json_dict_bytes_to_unicode
 from ansible.module_utils.six import iteritems
 from ansible.module_utils._text import to_native, to_text
-from ansible.plugins.inventory import BaseInventoryPlugin
+from ansible.module_utils.common._collections_compat import Mapping
+from ansible.plugins.inventory import BaseInventoryPlugin, Cacheable
+from ansible.utils.display import Display
+
+display = Display()
 
 
-class InventoryModule(BaseInventoryPlugin):
+class InventoryModule(BaseInventoryPlugin, Cacheable):
     ''' Host inventory parser for ansible using external inventory scripts. '''
 
     NAME = 'script'
@@ -53,7 +68,7 @@ class InventoryModule(BaseInventoryPlugin):
         self._hosts = set()
 
     def verify_file(self, path):
-        ''' Verify if file is usable by this plugin, base does minimal accesability check '''
+        ''' Verify if file is usable by this plugin, base does minimal accessibility check '''
 
         valid = super(InventoryModule, self).verify_file(path)
 
@@ -65,7 +80,7 @@ class InventoryModule(BaseInventoryPlugin):
                     initial_chars = inv_file.read(2)
                     if initial_chars.startswith(b'#!'):
                         shebang_present = True
-            except:
+            except Exception:
                 pass
 
             if not os.access(path, os.X_OK) and not shebang_present:
@@ -73,90 +88,94 @@ class InventoryModule(BaseInventoryPlugin):
 
         return valid
 
-    def parse(self, inventory, loader, path, cache=True):
+    def parse(self, inventory, loader, path, cache=None):
 
         super(InventoryModule, self).parse(inventory, loader, path)
+        self.set_options()
+
+        if self.get_option('cache') is not None:
+            display.deprecated(
+                msg="The 'cache' option is deprecated for the script inventory plugin. "
+                "External scripts implement their own caching and this option has never been used",
+                version="2.12", collection_name='ansible.builtin'
+            )
 
         # Support inventory scripts that are not prefixed with some
         # path information but happen to be in the current working
         # directory when '.' is not in PATH.
-        cmd = [ path, "--list" ]
+        cmd = [path, "--list"]
 
         try:
-            cache_key = self.get_cache_prefix(path)
-            if cache and cache_key in inventory.cache:
-                data = inventory.cache[cache_key]
-            else:
-                try:
-                    sp = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                    print('yo')
-                except OSError as e:
-                    raise AnsibleParserError("problem running %s (%s)" % (' '.join(cmd), to_native(e)))
-                (stdout, stderr) = sp.communicate()
+            try:
+                sp = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            except OSError as e:
+                raise AnsibleParserError("problem running %s (%s)" % (' '.join(cmd), to_native(e)))
+            (stdout, stderr) = sp.communicate()
 
-                path = to_native(path)
-                if stderr:
-                    err =  to_native(stderr) + "\n"
+            path = to_native(path)
+            err = to_native(stderr or "")
 
-                if sp.returncode != 0:
-                    raise AnsibleError("Inventory script (%s) had an execution error: %s " % (path, err))
+            if err and not err.endswith('\n'):
+                err += '\n'
 
-                # make sure script output is unicode so that json loader will output
-                # unicode strings itself
-                try:
-                    data = to_text(stdout, errors="strict")
-                except Exception as e:
-                    raise AnsibleError("Inventory {0} contained characters that cannot be interpreted as UTF-8: {1}".format(path, to_native(e)))
+            if sp.returncode != 0:
+                raise AnsibleError("Inventory script (%s) had an execution error: %s " % (path, err))
 
-                if cache:
-                    inventory.cache[cache_key] = data
+            # make sure script output is unicode so that json loader will output unicode strings itself
+            try:
+                data = to_text(stdout, errors="strict")
+            except Exception as e:
+                raise AnsibleError("Inventory {0} contained characters that cannot be interpreted as UTF-8: {1}".format(path, to_native(e)))
 
             try:
-                processed = self.loader.load(data)
+                processed = self.loader.load(data, json_only=True)
             except Exception as e:
                 raise AnsibleError("failed to parse executable inventory script results from {0}: {1}\n{2}".format(path, to_native(e), err))
+
+            # if no other errors happened and you want to force displaying stderr, do so now
+            if stderr and self.get_option('always_show_stderr'):
+                self.display.error(msg=to_text(err))
 
             if not isinstance(processed, Mapping):
                 raise AnsibleError("failed to parse executable inventory script results from {0}: needs to be a json dict\n{1}".format(path, err))
 
             group = None
             data_from_meta = None
+
+            # A "_meta" subelement may contain a variable "hostvars" which contains a hash for each host
+            # if this "hostvars" exists at all then do not call --host for each # host.
+            # This is for efficiency and scripts should still return data
+            # if called with --host for backwards compat with 1.2 and earlier.
             for (group, gdata) in processed.items():
                 if group == '_meta':
-                    if 'hostvars' in processed:
-                        data_from_meta = processed['hostvars']
+                    if 'hostvars' in gdata:
+                        data_from_meta = gdata['hostvars']
                 else:
                     self._parse_group(group, gdata)
 
-            # in Ansible 1.3 and later, a "_meta" subelement may contain
-            # a variable "hostvars" which contains a hash for each host
-            # if this "hostvars" exists at all then do not call --host for each
-            # host.  This is for efficiency and scripts should still return data
-            # if called with --host for backwards compat with 1.2 and earlier.
             for host in self._hosts:
                 got = {}
                 if data_from_meta is None:
                     got = self.get_host_variables(path, host)
                 else:
                     try:
-                        got = processed.get(host, {})
+                        got = data_from_meta.get(host, {})
                     except AttributeError as e:
-                        raise AnsibleError("Improperly formatted host information for %s: %s" % (host,to_native(e)))
+                        raise AnsibleError("Improperly formatted host information for %s: %s" % (host, to_native(e)), orig_exc=e)
 
-                    self.populate_host_vars(host, got, group)
+                self._populate_host_vars([host], got)
 
         except Exception as e:
             raise AnsibleParserError(to_native(e))
 
-
     def _parse_group(self, group, data):
 
-        self.inventory.add_group(group)
+        group = self.inventory.add_group(group)
 
         if not isinstance(data, dict):
             data = {'hosts': data}
         # is not those subkeys, then simplified syntax, host with vars
-        elif not any(k in data for k in ('hosts','vars','children')):
+        elif not any(k in data for k in ('hosts', 'vars', 'children')):
             data = {'hosts': [group], 'vars': data}
 
         if 'hosts' in data:
@@ -174,9 +193,9 @@ class InventoryModule(BaseInventoryPlugin):
             for k, v in iteritems(data['vars']):
                 self.inventory.set_variable(group, k, v)
 
-        if group != 'meta' and isinstance(data, dict) and 'children' in data:
+        if group != '_meta' and isinstance(data, dict) and 'children' in data:
             for child_name in data['children']:
-                self.inventory.add_group(child_name)
+                child_name = self.inventory.add_group(child_name)
                 self.inventory.add_child(group, child_name)
 
     def get_host_variables(self, path, host):
@@ -191,6 +210,6 @@ class InventoryModule(BaseInventoryPlugin):
         if out.strip() == '':
             return {}
         try:
-            return json_dict_bytes_to_unicode(self.loader.load(out))
+            return json_dict_bytes_to_unicode(self.loader.load(out, file_name=path))
         except ValueError:
             raise AnsibleError("could not parse post variable response: %s, %s" % (cmd, out))

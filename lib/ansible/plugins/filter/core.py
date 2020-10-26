@@ -34,80 +34,54 @@ import time
 import uuid
 import yaml
 
-from collections import MutableMapping, MutableSequence
-from datetime import datetime
+import datetime
 from functools import partial
 from random import Random, SystemRandom, shuffle
 
 from jinja2.filters import environmentfilter, do_groupby as _do_groupby
 
-try:
-    import passlib.hash
-    HAS_PASSLIB = True
-except:
-    HAS_PASSLIB = False
-
-from ansible import errors
-from ansible.module_utils.six import iteritems, string_types, integer_types
+from ansible.errors import AnsibleError, AnsibleFilterError, AnsibleFilterTypeError
+from ansible.module_utils.six import iteritems, string_types, integer_types, reraise
 from ansible.module_utils.six.moves import reduce, shlex_quote
-from ansible.module_utils._text import to_bytes, to_text
+from ansible.module_utils._text import to_bytes, to_native, to_text
+from ansible.module_utils.common.collections import is_sequence
+from ansible.module_utils.common._collections_compat import Mapping
+from ansible.parsing.ajson import AnsibleJSONEncoder
 from ansible.parsing.yaml.dumper import AnsibleDumper
+from ansible.template import recursive_check_defined
+from ansible.utils.display import Display
+from ansible.utils.encrypt import passlib_or_crypt
 from ansible.utils.hashing import md5s, checksum_s
 from ansible.utils.unicode import unicode_wrap
 from ansible.utils.vars import merge_hash
-from ansible.vars.hostvars import HostVars
 
+display = Display()
 
 UUID_NAMESPACE_ANSIBLE = uuid.UUID('361E6D51-FAEC-444A-9079-341386DA8E2E')
 
 
-class AnsibleJSONEncoder(json.JSONEncoder):
-    '''
-    Simple encoder class to deal with JSON encoding of internal
-    types like HostVars
-    '''
-    def default(self, o):
-        if isinstance(o, HostVars):
-            return dict(o)
-        else:
-            return super(AnsibleJSONEncoder, self).default(o)
-
 def to_yaml(a, *args, **kw):
     '''Make verbose, human readable yaml'''
-    transformed = yaml.dump(a, Dumper=AnsibleDumper, allow_unicode=True, **kw)
+    default_flow_style = kw.pop('default_flow_style', None)
+    transformed = yaml.dump(a, Dumper=AnsibleDumper, allow_unicode=True, default_flow_style=default_flow_style, **kw)
     return to_text(transformed)
+
 
 def to_nice_yaml(a, indent=4, *args, **kw):
     '''Make verbose, human readable yaml'''
     transformed = yaml.dump(a, Dumper=AnsibleDumper, indent=indent, allow_unicode=True, default_flow_style=False, **kw)
     return to_text(transformed)
 
+
 def to_json(a, *args, **kw):
     ''' Convert the value to JSON '''
     return json.dumps(a, cls=AnsibleJSONEncoder, *args, **kw)
 
-def to_nice_json(a, indent=4, *args, **kw):
-    '''Make verbose, human readable JSON'''
-    # python-2.6's json encoder is buggy (can't encode hostvars)
-    if sys.version_info < (2, 7):
-        try:
-            import simplejson
-        except ImportError:
-            pass
-        else:
-            try:
-                major = int(simplejson.__version__.split('.')[0])
-            except:
-                pass
-            else:
-                if major >= 2:
-                    return simplejson.dumps(a, indent=indent, sort_keys=True, *args, **kw)
 
-    try:
-        return json.dumps(a, indent=indent, sort_keys=True, cls=AnsibleJSONEncoder, *args, **kw)
-    except:
-        # Fallback to the to_json filter
-        return to_json(a, *args, **kw)
+def to_nice_json(a, indent=4, sort_keys=True, *args, **kw):
+    '''Make verbose, human readable JSON'''
+    return to_json(a, indent=indent, sort_keys=sort_keys, separators=(',', ': '), *args, **kw)
+
 
 def to_bool(a):
     ''' return a bool for the arg '''
@@ -119,41 +93,52 @@ def to_bool(a):
         return True
     return False
 
-def to_datetime(string, format="%Y-%d-%m %H:%M:%S"):
-    return datetime.strptime(string, format)
+
+def to_datetime(string, format="%Y-%m-%d %H:%M:%S"):
+    return datetime.datetime.strptime(string, format)
 
 
-def strftime(string_format, second = None):
+def strftime(string_format, second=None):
     ''' return a date string using string. See https://docs.python.org/2/library/time.html#time.strftime for format '''
     if second is not None:
         try:
-            second = int(second)
-        except:
-            raise errors.AnsibleFilterError('Invalid value for epoch value (%s)' % second)
+            second = float(second)
+        except Exception:
+            raise AnsibleFilterError('Invalid value for epoch value (%s)' % second)
     return time.strftime(string_format, time.localtime(second))
+
 
 def quote(a):
     ''' return its argument quoted for shell usage '''
-    return shlex_quote(a)
+    if a is None:
+        a = u''
+    return shlex_quote(to_text(a))
+
 
 def fileglob(pathname):
     ''' return list of matched regular files for glob '''
-    return [ g for g in glob.glob(pathname) if os.path.isfile(g) ]
+    return [g for g in glob.glob(pathname) if os.path.isfile(g)]
 
-def regex_replace(value='', pattern='', replacement='', ignorecase=False):
+
+def regex_replace(value='', pattern='', replacement='', ignorecase=False, multiline=False):
     ''' Perform a `re.sub` returning a string '''
 
     value = to_text(value, errors='surrogate_or_strict', nonstring='simplerepr')
 
+    flags = 0
     if ignorecase:
-        flags = re.I
-    else:
-        flags = 0
+        flags |= re.I
+    if multiline:
+        flags |= re.M
     _re = re.compile(pattern, flags=flags)
     return _re.sub(replacement, value)
 
+
 def regex_findall(value, regex, multiline=False, ignorecase=False):
     ''' Perform re.findall and return the list of matches '''
+
+    value = to_text(value, errors='surrogate_or_strict', nonstring='simplerepr')
+
     flags = 0
     if ignorecase:
         flags |= re.I
@@ -161,8 +146,11 @@ def regex_findall(value, regex, multiline=False, ignorecase=False):
         flags |= re.M
     return re.findall(regex, value, flags)
 
+
 def regex_search(value, regex, *args, **kwargs):
     ''' Perform re.search and return the list of matches or a backref '''
+
+    value = to_text(value, errors='surrogate_or_strict', nonstring='simplerepr')
 
     groups = list()
     for arg in args:
@@ -173,7 +161,7 @@ def regex_search(value, regex, *args, **kwargs):
             match = int(re.match(r'\\(\d+)', arg).group(1))
             groups.append(match)
         else:
-            raise errors.AnsibleFilterError('Unknown argument')
+            raise AnsibleFilterError('Unknown argument')
 
     flags = 0
     if kwargs.get('ignorecase'):
@@ -191,23 +179,47 @@ def regex_search(value, regex, *args, **kwargs):
                 items.append(match.group(item))
             return items
 
-def ternary(value, true_val, false_val):
+
+def ternary(value, true_val, false_val, none_val=None):
     '''  value ? true_val : false_val '''
-    if value:
+    if value is None and none_val is not None:
+        return none_val
+    elif bool(value):
         return true_val
     else:
         return false_val
 
 
-
-def regex_escape(string):
+def regex_escape(string, re_type='python'):
+    string = to_text(string, errors='surrogate_or_strict', nonstring='simplerepr')
     '''Escape all regular expressions special characters from STRING.'''
-    return re.escape(string)
+    if re_type == 'python':
+        return re.escape(string)
+    elif re_type == 'posix_basic':
+        # list of BRE special chars:
+        # https://en.wikibooks.org/wiki/Regular_Expressions/POSIX_Basic_Regular_Expressions
+        return regex_replace(string, r'([].[^$*\\])', r'\\\1')
+    # TODO: implement posix_extended
+    # It's similar to, but different from python regex, which is similar to,
+    # but different from PCRE.  It's possible that re.escape would work here.
+    # https://remram44.github.io/regex-cheatsheet/regex.html#programs
+    elif re_type == 'posix_extended':
+        raise AnsibleFilterError('Regex type (%s) not yet implemented' % re_type)
+    else:
+        raise AnsibleFilterError('Invalid regex type (%s)' % re_type)
+
 
 def from_yaml(data):
     if isinstance(data, string_types):
         return yaml.safe_load(data)
     return data
+
+
+def from_yaml_all(data):
+    if isinstance(data, string_types):
+        return yaml.safe_load_all(data)
+    return data
+
 
 @environmentfilter
 def rand(environment, end, start=None, step=None, seed=None):
@@ -223,10 +235,11 @@ def rand(environment, end, start=None, step=None, seed=None):
         return r.randrange(start, end, step)
     elif hasattr(end, '__iter__'):
         if start or step:
-            raise errors.AnsibleFilterError('start and step can only be used with integer values')
+            raise AnsibleFilterError('start and step can only be used with integer values')
         return r.choice(end)
     else:
-        raise errors.AnsibleFilterError('random can only be used on sequences and integers')
+        raise AnsibleFilterError('random can only be used on sequences and integers')
+
 
 def randomize_list(mylist, seed=None):
     try:
@@ -236,81 +249,98 @@ def randomize_list(mylist, seed=None):
             r.shuffle(mylist)
         else:
             shuffle(mylist)
-    except:
+    except Exception:
         pass
     return mylist
 
+
 def get_hash(data, hashtype='sha1'):
-
-    try: # see if hash is supported
+    try:
         h = hashlib.new(hashtype)
-    except:
-        return None
+    except Exception as e:
+        # hash is not supported?
+        raise AnsibleFilterError(e)
 
-    h.update(to_bytes(data, errors='surrogate_then_strict'))
+    h.update(to_bytes(data, errors='surrogate_or_strict'))
     return h.hexdigest()
 
-def get_encrypted_password(password, hashtype='sha512', salt=None):
 
-    # TODO: find a way to construct dynamically from system
-    cryptmethod= {
-        'md5':      '1',
-        'blowfish': '2a',
-        'sha256':   '5',
-        'sha512':   '6',
+def get_encrypted_password(password, hashtype='sha512', salt=None, salt_size=None, rounds=None):
+    passlib_mapping = {
+        'md5': 'md5_crypt',
+        'blowfish': 'bcrypt',
+        'sha256': 'sha256_crypt',
+        'sha512': 'sha512_crypt',
     }
 
-    if hashtype in cryptmethod:
-        if salt is None:
-            r = SystemRandom()
-            if hashtype in ['md5']:
-                saltsize = 8
-            else:
-                saltsize = 16
-            saltcharset = string.ascii_letters + string.digits + '/.'
-            salt = ''.join([r.choice(saltcharset) for _ in range(saltsize)])
+    hashtype = passlib_mapping.get(hashtype, hashtype)
+    try:
+        return passlib_or_crypt(password, hashtype, salt=salt, salt_size=salt_size, rounds=rounds)
+    except AnsibleError as e:
+        reraise(AnsibleFilterError, AnsibleFilterError(to_native(e), orig_exc=e), sys.exc_info()[2])
 
-        if not HAS_PASSLIB:
-            if sys.platform.startswith('darwin'):
-                raise errors.AnsibleFilterError('|password_hash requires the passlib python module to generate password hashes on Mac OS X/Darwin')
-            saltstring =  "$%s$%s" % (cryptmethod[hashtype],salt)
-            encrypted = crypt.crypt(password, saltstring)
-        else:
-            if hashtype == 'blowfish':
-                cls = passlib.hash.bcrypt
-            else:
-                cls = getattr(passlib.hash, '%s_crypt' % hashtype)
 
-            encrypted = cls.encrypt(password, salt=salt)
+def to_uuid(string, namespace=UUID_NAMESPACE_ANSIBLE):
+    uuid_namespace = namespace
+    if not isinstance(uuid_namespace, uuid.UUID):
+        try:
+            uuid_namespace = uuid.UUID(namespace)
+        except (AttributeError, ValueError) as e:
+            raise AnsibleFilterError("Invalid value '%s' for 'namespace': %s" % (to_native(namespace), to_native(e)))
+    # uuid.uuid5() requires bytes on Python 2 and bytes or text or Python 3
+    return to_text(uuid.uuid5(uuid_namespace, to_native(string, errors='surrogate_or_strict')))
 
-        return encrypted
 
-    return None
-
-def to_uuid(string):
-    return str(uuid.uuid5(UUID_NAMESPACE_ANSIBLE, str(string)))
-
-def mandatory(a):
+def mandatory(a, msg=None):
     from jinja2.runtime import Undefined
 
     ''' Make a variable mandatory '''
     if isinstance(a, Undefined):
-        raise errors.AnsibleFilterError('Mandatory variable not defined.')
+        if a._undefined_name is not None:
+            name = "'%s' " % to_text(a._undefined_name)
+        else:
+            name = ''
+
+        if msg is not None:
+            raise AnsibleFilterError(to_native(msg))
+        else:
+            raise AnsibleFilterError("Mandatory variable %s not defined." % name)
+
     return a
 
+
 def combine(*terms, **kwargs):
-    recursive = kwargs.get('recursive', False)
-    if len(kwargs) > 1 or (len(kwargs) == 1 and 'recursive' not in kwargs):
-        raise errors.AnsibleFilterError("'recursive' is the only valid keyword argument")
+    recursive = kwargs.pop('recursive', False)
+    list_merge = kwargs.pop('list_merge', 'replace')
+    if kwargs:
+        raise AnsibleFilterError("'recursive' and 'list_merge' are the only valid keyword arguments")
 
-    for t in terms:
-        if not isinstance(t, dict):
-            raise errors.AnsibleFilterError("|combine expects dictionaries, got " + repr(t))
+    # allow the user to do `[dict1, dict2, ...] | combine`
+    dictionaries = flatten(terms, levels=1)
 
-    if recursive:
-        return reduce(merge_hash, terms)
-    else:
-        return dict(itertools.chain(*map(iteritems, terms)))
+    # recursively check that every elements are defined (for jinja2)
+    recursive_check_defined(dictionaries)
+
+    if not dictionaries:
+        return {}
+
+    if len(dictionaries) == 1:
+        return dictionaries[0]
+
+    # merge all the dicts so that the dict at the end of the array have precedence
+    # over the dict at the beginning.
+    # we merge the dicts from the highest to the lowest priority because there is
+    # a huge probability that the lowest priority dict will be the biggest in size
+    # (as the low prio dict will hold the "default" values and the others will be "patches")
+    # and merge_hash create a copy of it's first argument.
+    # so high/right -> low/left is more efficient than low/left -> high/right
+    high_to_low_prio_dict_iterator = reversed(dictionaries)
+    result = next(high_to_low_prio_dict_iterator)
+    for dictionary in high_to_low_prio_dict_iterator:
+        result = merge_hash(dictionary, result, recursive, list_merge)
+
+    return result
+
 
 def comment(text, style='plain', **kw):
     # Predefined comment types
@@ -394,61 +424,21 @@ def comment(text, style='plain', **kw):
         str_postfix,
         str_end)
 
-def extract(item, container, morekeys=None):
-    from jinja2.runtime import Undefined
 
-    value = container[item]
+@environmentfilter
+def extract(environment, item, container, morekeys=None):
+    if morekeys is None:
+        keys = [item]
+    elif isinstance(morekeys, list):
+        keys = [item] + morekeys
+    else:
+        keys = [item, morekeys]
 
-    if value is not Undefined and morekeys is not None:
-        if not isinstance(morekeys, list):
-            morekeys = [morekeys]
-
-        try:
-            value = reduce(lambda d, k: d[k], morekeys, value)
-        except KeyError:
-            value = Undefined()
+    value = container
+    for key in keys:
+        value = environment.getitem(value, key)
 
     return value
-
-def failed(*a, **kw):
-    ''' Test if task result yields failed '''
-    item = a[0]
-    if not isinstance(item, MutableMapping):
-        raise errors.AnsibleFilterError("|failed expects a dictionary")
-    rc = item.get('rc', 0)
-    failed = item.get('failed', False)
-    if rc != 0 or failed:
-        return True
-    else:
-        return False
-
-def success(*a, **kw):
-    ''' Test if task result yields success '''
-    return not failed(*a, **kw)
-
-def changed(*a, **kw):
-    ''' Test if task result yields changed '''
-    item = a[0]
-    if not isinstance(item, MutableMapping):
-        raise errors.AnsibleFilterError("|changed expects a dictionary")
-    if not 'changed' in item:
-        changed = False
-        if ('results' in item    # some modules return a 'results' key
-                and isinstance(item['results'], MutableSequence)
-                and isinstance(item['results'][0], MutableMapping)):
-            for result in item['results']:
-                changed = changed or result.get('changed', False)
-    else:
-        changed = item.get('changed', False)
-    return changed
-
-def skipped(*a, **kw):
-    ''' Test if task result yields skipped '''
-    item = a[0]
-    if not isinstance(item, MutableMapping):
-        raise errors.AnsibleFilterError("|skipped expects a dictionary")
-    skipped = item.get('skipped', False)
-    return skipped
 
 
 @environmentfilter
@@ -471,12 +461,113 @@ def do_groupby(environment, value, attribute):
     return [tuple(t) for t in _do_groupby(environment, value, attribute)]
 
 
-def b64encode(string):
-    return to_text(base64.b64encode(to_bytes(string, errors='surrogate_then_strict')))
+def b64encode(string, encoding='utf-8'):
+    return to_text(base64.b64encode(to_bytes(string, encoding=encoding, errors='surrogate_or_strict')))
 
 
-def b64decode(string):
-    return to_text(base64.b64decode(to_bytes(string, errors='surrogate_then_strict')))
+def b64decode(string, encoding='utf-8'):
+    return to_text(base64.b64decode(to_bytes(string, errors='surrogate_or_strict')), encoding=encoding)
+
+
+def flatten(mylist, levels=None, skip_nulls=True):
+
+    ret = []
+    for element in mylist:
+        if skip_nulls and element in (None, 'None', 'null'):
+            # ignore null items
+            continue
+        elif is_sequence(element):
+            if levels is None:
+                ret.extend(flatten(element, skip_nulls=skip_nulls))
+            elif levels >= 1:
+                # decrement as we go down the stack
+                ret.extend(flatten(element, levels=(int(levels) - 1), skip_nulls=skip_nulls))
+            else:
+                ret.append(element)
+        else:
+            ret.append(element)
+
+    return ret
+
+
+def subelements(obj, subelements, skip_missing=False):
+    '''Accepts a dict or list of dicts, and a dotted accessor and produces a product
+    of the element and the results of the dotted accessor
+
+    >>> obj = [{"name": "alice", "groups": ["wheel"], "authorized": ["/tmp/alice/onekey.pub"]}]
+    >>> subelements(obj, 'groups')
+    [({'name': 'alice', 'groups': ['wheel'], 'authorized': ['/tmp/alice/onekey.pub']}, 'wheel')]
+
+    '''
+    if isinstance(obj, dict):
+        element_list = list(obj.values())
+    elif isinstance(obj, list):
+        element_list = obj[:]
+    else:
+        raise AnsibleFilterError('obj must be a list of dicts or a nested dict')
+
+    if isinstance(subelements, list):
+        subelement_list = subelements[:]
+    elif isinstance(subelements, string_types):
+        subelement_list = subelements.split('.')
+    else:
+        raise AnsibleFilterTypeError('subelements must be a list or a string')
+
+    results = []
+
+    for element in element_list:
+        values = element
+        for subelement in subelement_list:
+            try:
+                values = values[subelement]
+            except KeyError:
+                if skip_missing:
+                    values = []
+                    break
+                raise AnsibleFilterError("could not find %r key in iterated item %r" % (subelement, values))
+            except TypeError:
+                raise AnsibleFilterTypeError("the key %s should point to a dictionary, got '%s'" % (subelement, values))
+        if not isinstance(values, list):
+            raise AnsibleFilterTypeError("the key %r should point to a list, got %r" % (subelement, values))
+
+        for value in values:
+            results.append((element, value))
+
+    return results
+
+
+def dict_to_list_of_dict_key_value_elements(mydict, key_name='key', value_name='value'):
+    ''' takes a dictionary and transforms it into a list of dictionaries,
+        with each having a 'key' and 'value' keys that correspond to the keys and values of the original '''
+
+    if not isinstance(mydict, Mapping):
+        raise AnsibleFilterTypeError("dict2items requires a dictionary, got %s instead." % type(mydict))
+
+    ret = []
+    for key in mydict:
+        ret.append({key_name: key, value_name: mydict[key]})
+    return ret
+
+
+def list_of_dict_key_value_elements_to_dict(mylist, key_name='key', value_name='value'):
+    ''' takes a list of dicts with each having a 'key' and 'value' keys, and transforms the list into a dictionary,
+        effectively as the reverse of dict2items '''
+
+    if not is_sequence(mylist):
+        raise AnsibleFilterTypeError("items2dict requires a list, got %s instead." % type(mylist))
+
+    return dict((item[key_name], item[value_name]) for item in mylist)
+
+
+def path_join(paths):
+    ''' takes a sequence or a string, and return a concatenation
+        of the different members '''
+    if isinstance(paths, string_types):
+        return os.path.join(paths)
+    elif is_sequence(paths):
+        return os.path.join(*paths)
+    else:
+        raise AnsibleFilterTypeError("|path_join expects string or sequence, got %s instead." % type(paths))
 
 
 class FilterModule(object):
@@ -503,14 +594,14 @@ class FilterModule(object):
             'to_yaml': to_yaml,
             'to_nice_yaml': to_nice_yaml,
             'from_yaml': from_yaml,
-
-            #date
-            'to_datetime': to_datetime,
+            'from_yaml_all': from_yaml_all,
 
             # path
             'basename': partial(unicode_wrap, os.path.basename),
             'dirname': partial(unicode_wrap, os.path.dirname),
             'expanduser': partial(unicode_wrap, os.path.expanduser),
+            'expandvars': partial(unicode_wrap, os.path.expandvars),
+            'path_join': path_join,
             'realpath': partial(unicode_wrap, os.path.realpath),
             'relpath': partial(unicode_wrap, os.path.relpath),
             'splitext': partial(unicode_wrap, os.path.splitext),
@@ -518,10 +609,14 @@ class FilterModule(object):
             'win_dirname': partial(unicode_wrap, ntpath.dirname),
             'win_splitdrive': partial(unicode_wrap, ntpath.splitdrive),
 
-            # value as boolean
-            'bool': to_bool,
+            # file glob
+            'fileglob': fileglob,
 
-            # date formating
+            # types
+            'bool': to_bool,
+            'to_datetime': to_datetime,
+
+            # date formatting
             'strftime': strftime,
 
             # quote string for shell usage
@@ -530,16 +625,13 @@ class FilterModule(object):
             # hash filters
             # md5 hex digest of string
             'md5': md5s,
-            # sha1 hex digeset of string
+            # sha1 hex digest of string
             'sha1': checksum_s,
-            # checksum of string as used by ansible for checksuming files
+            # checksum of string as used by ansible for checksumming files
             'checksum': checksum_s,
             # generic hashing
             'password_hash': get_encrypted_password,
             'hash': get_hash,
-
-            # file glob
-            'fileglob': fileglob,
 
             # regex
             'regex_replace': regex_replace,
@@ -550,36 +642,24 @@ class FilterModule(object):
             # ? : ;
             'ternary': ternary,
 
-            # list
             # random stuff
             'random': rand,
             'shuffle': randomize_list,
+
             # undefined
             'mandatory': mandatory,
-
-            # merge dicts
-            'combine': combine,
 
             # comment-style decoration
             'comment': comment,
 
-            # array and dict lookups
-            'extract': extract,
-
-            # failure testing
-            'failed'    : failed,
-            'failure'   : failed,
-            'success'   : success,
-            'succeeded' : success,
-
-            # changed testing
-            'changed' : changed,
-            'change'  : changed,
-
-            # skip testing
-            'skipped' : skipped,
-            'skip'    : skipped,
-
             # debug
             'type_debug': lambda o: o.__class__.__name__,
+
+            # Data structures
+            'combine': combine,
+            'extract': extract,
+            'flatten': flatten,
+            'dict2items': dict_to_list_of_dict_key_value_elements,
+            'items2dict': list_of_dict_key_value_elements_to_dict,
+            'subelements': subelements,
         }
